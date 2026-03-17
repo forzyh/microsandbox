@@ -1,22 +1,21 @@
-//! Management components for the Microsandbox runtime.
+//! Microsandbox 管理模块
 //!
-//! This module serves as the central management system for Microsandbox, providing
-//! functionality for managing sandboxes, images, environments, root filesystems,
-//! and databases. It coordinates the various components needed for container
-//! and sandbox operations.
+//! 本模块作为 Microsandbox 的中央管理系统，提供管理沙箱、镜像、环境、
+//! 根文件系统和数据库的功能。它协调容器和沙箱操作所需的各种组件。
 //!
-//! Key components:
-//! - `db`: Database management for storing container and sandbox metadata
-//! - `image`: Container image handling and registry operations
-//! - `menv`: Microsandbox environment management
-//! - `rootfs`: Root filesystem operations for containers
-//! - `sandbox`: Sandbox creation and management
-//! - `orchestra`: Orchestra management for sandboxes
-//! - `home`: Home directory management
-//! - `toolchain`: Toolchain management
+//! ## 主要组件
+//!
+//! - **config** - 配置管理，用于添加、删除和列出配置组件
+//! - **db** - 数据库管理，存储容器和沙箱元数据
+//! - **home** - 主目录管理，管理全局 microsandbox 数据
+//! - **menv** - Microsandbox 环境管理
+//! - **orchestra** - 沙箱编排管理
+//! - **rootfs** - 根文件系统操作
+//! - **sandbox** - 沙箱创建和管理
+//! - **toolchain** - 工具链管理
 
 //--------------------------------------------------------------------------------------------------
-// Exports
+// 导出
 //--------------------------------------------------------------------------------------------------
 
 pub mod config;

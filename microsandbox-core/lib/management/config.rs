@@ -1,7 +1,21 @@
-//! Configuration management for the Microsandbox runtime.
+//! Microsandbox 运行时配置管理模块
 //!
-//! This module provides structures and utilities for modifying Microsandbox
-//! configuration.
+//! 本模块提供了用于修改 Microsandbox 配置的结构和工具。
+//! 支持添加、删除和列出配置组件，同时保留原有 YAML 格式。
+//!
+//! ## 主要功能
+//!
+//! - **配置加载** - 从 YAML 文件加载 Microsandbox 配置
+//! - **组件添加** - 向配置文件添加新的沙箱组件
+//! - **组件删除** - 从配置文件移除现有组件
+//! - **组件列表** - 列出配置中定义的组件
+//! - **镜像默认值** - 从 OCI 镜像配置应用默认值
+//!
+//! ## 配置组件类型
+//!
+//! - **Sandbox** - 沙箱配置，包含镜像、资源、挂载等
+//! - **Build** - 构建任务配置（待实现）
+//! - **Group** - 沙箱组配置（待实现）
 
 use microsandbox_utils::{DEFAULT_SHELL, MICROSANDBOX_CONFIG_FILENAME};
 use nondestructive::yaml;
@@ -22,97 +36,112 @@ use crate::{
 use super::db;
 
 //--------------------------------------------------------------------------------------------------
-// Types
+// 类型定义
 //--------------------------------------------------------------------------------------------------
 
+/// 沙箱组件配置
+///
+/// 此结构包含了定义一个沙箱所需的所有配置项。
+/// 用于 `add` 函数中指定要添加的沙箱配置。
 #[derive(Debug, Clone)]
-/// Configuration for a sandbox component.
 pub struct SandboxConfig {
-    /// The image to use for the sandbox.
+    /// 沙箱使用的镜像（OCI 引用或本地路径）
     pub image: String,
 
-    /// The amount of memory in MiB to use.
+    /// 使用的内存大小（MiB）
     pub memory: Option<u32>,
 
-    /// The number of CPUs to use.
+    /// 使用的 CPU 核心数
     pub cpus: Option<u32>,
 
-    /// The volumes to mount.
+    /// 要挂载的卷列表（格式："host_path:guest_path"）
     pub volumes: Vec<String>,
 
-    /// The ports to expose.
+    /// 要暴露的端口列表（格式："host_port:guest_port"）
     pub ports: Vec<String>,
 
-    /// The environment variables to use.
+    /// 要设置的环境变量列表（格式："KEY=VALUE"）
     pub envs: Vec<String>,
 
-    /// The environment file to use.
+    /// 环境变量文件路径
     pub env_file: Option<Utf8UnixPathBuf>,
 
-    /// The dependencies to use for the sandbox.
+    /// 沙箱依赖的其他沙箱名称列表
     pub depends_on: Vec<String>,
 
-    /// The working directory to use for the sandbox.
+    /// 沙箱内的工作目录路径
     pub workdir: Option<Utf8UnixPathBuf>,
 
-    /// The shell to use for the sandbox.
+    /// 使用的 shell 路径
     pub shell: Option<String>,
 
-    /// The scripts to use for the sandbox.
+    /// 沙箱中可用的脚本映射（名称 -> 内容）
     pub scripts: HashMap<String, String>,
 
-    /// The imports to use for the sandbox.
+    /// 要导入的文件映射（名称 -> 路径）
     pub imports: HashMap<String, Utf8UnixPathBuf>,
 
-    /// The exports to use for the sandbox.
+    /// 要导出的文件映射（名称 -> 路径）
     pub exports: HashMap<String, Utf8UnixPathBuf>,
 
-    /// The network scope to use for the sandbox.
+    /// 网络范围配置
     pub scope: Option<String>,
 }
 
+/// 要添加到 Microsandbox 配置的组件
+///
+/// 此枚举定义了可以添加到配置的组件类型。
+/// 目前仅支持 Sandbox 组件，Build 和 Group 为占位符。
 #[derive(Debug, Clone)]
-/// The component to add to the Microsandbox configuration.
 pub enum Component {
-    /// A sandbox component.
+    /// 沙箱组件
     Sandbox(Box<SandboxConfig>),
-    /// A build component.
+    /// 构建任务组件（待实现）
     Build {},
-    /// A group component.
+    /// 沙箱组组件（待实现）
     Group {},
 }
 
-/// The type of component to add to the Microsandbox configuration.
+/// 要添加到 Microsandbox 配置的组件类型
+///
+/// 用于 `list` 和 `remove` 函数中指定操作的组件类型。
 #[derive(Debug, Clone)]
 pub enum ComponentType {
-    /// A sandbox component.
+    /// 沙箱组件
     Sandbox,
-    /// A build component.
+    /// 构建任务组件
     Build,
-    /// A group component.
+    /// 沙箱组组件
     Group,
 }
 
 //--------------------------------------------------------------------------------------------------
-// Functions
+// 函数实现
 //--------------------------------------------------------------------------------------------------
 
-/// Adds one or more components to the Microsandbox configuration.
+/// 向 Microsandbox 配置添加一个或多个组件
 ///
-/// Modifies the Microsandbox configuration file by adding new components while preserving
-/// the existing formatting and structure.
+/// 此函数通过添加新组件来修改 Microsandbox 配置文件，
+/// 同时保留现有的格式和结构。使用非破坏性 YAML 解析
+/// 来保持原有注释和格式。
 ///
-/// ## Arguments
+/// ## 参数
+/// * `names` - 要添加的组件名称列表
+/// * `component` - 要添加的组件规格
+/// * `project_dir` - 可选的项目目录路径（默认为当前目录）
+/// * `config_file` - 可选的配置文件路径（默认为标准文件名）
 ///
-/// * `names` - Names for the components to add
-/// * `component` - The component specification to add
-/// * `project_dir` - Optional project directory path (defaults to current directory)
-/// * `config_file` - Optional config file path (defaults to standard filename)
+/// ## 返回值
+/// * `Ok(())` - 成功
+/// * `Err(MicrosandboxError)` - 文件无法找到/读取/写入，
+///   包含无效 YAML，或已存在同名组件
 ///
-/// ## Returns
-///
-/// * `Ok(())` on success, or error if the file cannot be found/read/written,
-///   contains invalid YAML, or a component with the same name already exists
+/// ## 处理流程
+/// 1. 解析配置文件路径
+/// 2. 读取 YAML 内容
+/// 3. 使用非破坏性方式解析 YAML
+/// 4. 为每个名称创建沙箱配置
+/// 5. 将修改后的 YAML 写回文件
 pub async fn add(
     names: &[String],
     component: &Component,
@@ -121,10 +150,10 @@ pub async fn add(
 ) -> MicrosandboxResult<()> {
     let (_, _, full_config_path) = resolve_config_paths(project_dir, config_file).await?;
 
-    // Read the configuration file content
+    // 读取配置文件内容
     let config_contents = fs::read_to_string(&full_config_path).await?;
 
-    // Parse the YAML document using nondestructive
+    // 使用非破坏性方式解析 YAML 文档
     let mut doc = yaml::from_slice(config_contents.as_bytes())
         .map_err(|e| MicrosandboxError::ConfigParseError(e.to_string()))?;
 
@@ -134,19 +163,19 @@ pub async fn add(
                 let doc_mut = doc.as_mut();
                 let mut root_mapping = doc_mut.make_mapping();
 
-                // Ensure the "sandboxes" key exists in the root mapping
+                // 确保 "sandboxes" 键存在于根映射中
                 let mut sandboxes_mapping =
                     if let Some(sandboxes_mut) = root_mapping.get_mut("sandboxes") {
-                        // Get the existing sandboxes mapping
+                        // 获取现有的 sandboxes 映射
                         sandboxes_mut.make_mapping()
                     } else {
-                        // Create a new sandboxes mapping if it doesn't exist
+                        // 如果不存在则创建新的 sandboxes 映射
                         root_mapping
                             .insert("sandboxes", yaml::Separator::Auto)
                             .make_mapping()
                     };
 
-                // Check if the sandbox already exists by trying to get it
+                // 通过尝试获取来检查沙箱是否已存在
                 if sandboxes_mapping.get_mut(name).is_some() {
                     return Err(MicrosandboxError::ConfigValidation(format!(
                         "Sandbox with name '{}' already exists",
@@ -154,15 +183,15 @@ pub async fn add(
                     )));
                 }
 
-                // Create a new sandbox mapping
+                // 创建新的沙箱映射
                 let mut sandbox_mapping = sandboxes_mapping
                     .insert(name, yaml::Separator::Auto)
                     .make_mapping();
 
-                // Add image field (required)
+                // 添加 image 字段（必填）
                 sandbox_mapping.insert_str("image", &config.image);
 
-                // Add optional fields
+                // 添加可选字段
                 if let Some(memory_value) = config.memory {
                     sandbox_mapping.insert_u32("memory", memory_value);
                 }
@@ -171,14 +200,14 @@ pub async fn add(
                     sandbox_mapping.insert_u32("cpus", cpus_value);
                 }
 
-                // Add shell (default if not provided)
+                // 添加 shell（如果未提供则使用默认值）
                 if let Some(shell_value) = &config.shell {
                     sandbox_mapping.insert_str("shell", shell_value);
                 } else if sandbox_mapping.get_mut("shell").is_none() {
                     sandbox_mapping.insert_str("shell", DEFAULT_SHELL);
                 }
 
-                // Add volumes if any
+                // 添加 volumes（如果有）
                 if !config.volumes.is_empty() {
                     let mut volumes_sequence = sandbox_mapping
                         .insert("volumes", yaml::Separator::Auto)
@@ -189,7 +218,7 @@ pub async fn add(
                     }
                 }
 
-                // Add ports if any
+                // 添加 ports（如果有）
                 if !config.ports.is_empty() {
                     let mut ports_sequence = sandbox_mapping
                         .insert("ports", yaml::Separator::Auto)
@@ -200,7 +229,7 @@ pub async fn add(
                     }
                 }
 
-                // Add env vars if any
+                // 添加 env vars（如果有）
                 if !config.envs.is_empty() {
                     let mut envs_sequence = sandbox_mapping
                         .insert("envs", yaml::Separator::Auto)
@@ -211,12 +240,12 @@ pub async fn add(
                     }
                 }
 
-                // Add env_file if provided
+                // 如果提供了则添加 env_file
                 if let Some(env_file_path) = &config.env_file {
                     sandbox_mapping.insert_str("env_file", env_file_path);
                 }
 
-                // Add depends_on if any
+                // 添加 depends_on（如果有）
                 if !config.depends_on.is_empty() {
                     let mut depends_on_sequence = sandbox_mapping
                         .insert("depends_on", yaml::Separator::Auto)
@@ -227,12 +256,12 @@ pub async fn add(
                     }
                 }
 
-                // Add workdir if provided
+                // 如果提供了则添加 workdir
                 if let Some(workdir_path) = &config.workdir {
                     sandbox_mapping.insert_str("workdir", workdir_path);
                 }
 
-                // Add scripts if any
+                // 添加 scripts（如果有）
                 if !config.scripts.is_empty() {
                     let mut scripts_mapping = sandbox_mapping
                         .insert("scripts", yaml::Separator::Auto)
@@ -243,7 +272,7 @@ pub async fn add(
                     }
                 }
 
-                // Add imports if any
+                // 添加 imports（如果有）
                 if !config.imports.is_empty() {
                     let mut imports_mapping = sandbox_mapping
                         .insert("imports", yaml::Separator::Auto)
@@ -254,7 +283,7 @@ pub async fn add(
                     }
                 }
 
-                // Add exports if any
+                // 添加 exports（如果有）
                 if !config.exports.is_empty() {
                     let mut exports_mapping = sandbox_mapping
                         .insert("exports", yaml::Separator::Auto)
@@ -265,7 +294,7 @@ pub async fn add(
                     }
                 }
 
-                // Add network scope if provided
+                // 如果提供了则添加 network scope
                 if let Some(scope_value) = &config.scope {
                     let mut network_mapping = sandbox_mapping
                         .insert("network", yaml::Separator::Auto)
@@ -279,30 +308,32 @@ pub async fn add(
         }
     }
 
-    // Write the modified YAML back to the file, preserving formatting
+    // 将修改后的 YAML 写回文件，保留格式
     let modified_content = doc.to_string();
 
-    // TODO: Validate config before writing
+    // TODO: 在写入前验证配置
     fs::write(full_config_path, modified_content).await?;
 
     Ok(())
 }
 
-/// Removes a component from the Microsandbox configuration.
+/// 从 Microsandbox 配置中删除组件
 ///
-/// Modifies the Microsandbox configuration file by removing an existing component
-/// while preserving the existing formatting and structure.
+/// 此函数通过删除现有组件来修改 Microsandbox 配置文件，
+/// 同时保留现有的格式和结构。
 ///
-/// ## Arguments
+/// ## 参数
+/// * `component_type` - 要从配置中删除的组件类型
+/// * `names` - 要删除的组件名称列表
+/// * `project_dir` - 可选的项目目录路径
+/// * `config_file` - 可选的配置文件路径
 ///
-/// * `component` - The component to remove from the configuration
+/// ## 返回值
+/// * `Ok(())` - 成功
+/// * `Err(MicrosandboxError)` - 文件无法找到/读取/写入，
+///   包含无效 YAML，或组件不存在
 ///
-/// ## Returns
-///
-/// * `Ok(())` on success, or error if the file cannot be found/read/written,
-///   contains invalid YAML, or the component does not exist
-///
-/// Note: This function is currently a placeholder and needs to be implemented.
+/// 注意：此函数目前是占位符，需要完整实现。
 pub async fn remove(
     component_type: ComponentType,
     names: &[String],
@@ -311,7 +342,7 @@ pub async fn remove(
 ) -> MicrosandboxResult<()> {
     let (_, _, full_config_path) = resolve_config_paths(project_dir, config_file).await?;
 
-    // Read the configuration file content
+    // 读取配置文件内容
     let config_contents = fs::read_to_string(&full_config_path).await?;
 
     let mut doc = yaml::from_slice(config_contents.as_bytes())
@@ -326,16 +357,16 @@ pub async fn remove(
                     "config is not valid. expected an object".to_string(),
                 ))?;
 
-        // Ensure the "sandboxes" key exists in the root mapping
+        // 确保 "sandboxes" 键存在于根映射中
         let mut sandboxes_mapping = if let Some(sandboxes_mut) = root_mapping.get_mut("sandboxes") {
-            // Get the existing sandboxes mapping
+            // 获取现有的 sandboxes 映射
             sandboxes_mut
                 .into_mapping_mut()
                 .ok_or(MicrosandboxError::ConfigParseError(
                     "sandboxes is not a valid mapping".to_string(),
                 ))?
         } else {
-            // Create a new sandboxes mapping if it doesn't exist
+            // 如果不存在则创建新的 sandboxes 映射
             root_mapping
                 .insert("sandboxes", yaml::Separator::Auto)
                 .make_mapping()
@@ -346,29 +377,28 @@ pub async fn remove(
         }
     }
 
-    // Write the modified YAML back to the file, preserving formatting
+    // 将修改后的 YAML 写回文件，保留格式
     let modified_content = doc.to_string();
 
-    // TODO: Validate config before writing
+    // TODO: 在写入前验证配置
     fs::write(full_config_path, modified_content).await?;
 
     Ok(())
 }
 
-/// Lists components in the Microsandbox configuration.
+/// 列出 Microsandbox 配置中的组件
 ///
-/// Retrieves and displays information about components defined in the Microsandbox configuration.
+/// 检索并显示 Microsandbox 配置中定义的组件信息。
 ///
-/// ## Arguments
+/// ## 参数
+/// * `component_type` - 要列出的组件类型
+/// * `project_dir` - 可选的项目目录路径（默认为当前目录）
+/// * `config_file` - 可选的配置文件路径（默认为标准文件名）
 ///
-/// * `component_type` - The type of component to list
-/// * `project_dir` - Optional path to the project directory. If None, defaults to current directory
-/// * `config_file` - Optional path to the Microsandbox config file. If None, uses default filename
-///
-/// ## Returns
-///
-/// * `Ok(())` on success, or error if the file cannot be found/read/written,
-///   contains invalid YAML, or the component does not exist
+/// ## 返回值
+/// * `Ok(Vec<String>)` - 组件名称列表
+/// * `Err(MicrosandboxError)` - 文件无法找到/读取/写入，
+///   包含无效 YAML，或组件不存在
 pub async fn list(
     component_type: ComponentType,
     project_dir: Option<&Path>,
@@ -384,91 +414,87 @@ pub async fn list(
 }
 
 //--------------------------------------------------------------------------------------------------
-// Functions: Helpers
+// 辅助函数
 //--------------------------------------------------------------------------------------------------
 
-/// Loads a Microsandbox configuration from a file.
+/// 从文件加载 Microsandbox 配置
 ///
-/// This function handles all the common steps for loading a Microsandbox configuration, including:
-/// - Resolving the project directory and config file path
-/// - Validating the config file path
-/// - Checking if the config file exists
-/// - Reading and parsing the config file
+/// 此函数处理加载 Microsandbox 配置的所有常见步骤，包括：
+/// - 解析项目目录和配置文件路径
+/// - 验证配置文件路径
+/// - 检查配置文件是否存在
+/// - 读取和解析配置文件
 ///
-/// ## Arguments
+/// ## 参数
+/// * `project_dir` - 可选的项目目录路径（默认为当前目录）
+/// * `config_file` - 可选的配置文件路径（默认为标准文件名）
 ///
-/// * `project_dir` - Optional path to the project directory. If None, defaults to current directory
-/// * `config_file` - Optional path to the Microsandbox config file. If None, uses default filename
+/// ## 返回值
+/// 返回包含以下内容的元组：
+/// - 加载的 Microsandbox 配置
+/// - 规范化的项目目录路径
+/// - 配置文件名称
 ///
-/// ## Returns
-///
-/// Returns a tuple containing:
-/// - The loaded Microsandbox configuration
-/// - The canonical project directory path
-/// - The config file name
-///
-/// Or a `MicrosandboxError` if:
-/// - The config file path is invalid
-/// - The config file does not exist
-/// - The config file cannot be read
-/// - The config file contains invalid YAML
+/// 或 `MicrosandboxError` 如果：
+/// - 配置文件路径无效
+/// - 配置文件不存在
+/// - 配置文件无法读取
+/// - 配置文件包含无效 YAML
 pub async fn load_config(
     project_dir: Option<&Path>,
     config_file: Option<&str>,
 ) -> MicrosandboxResult<(Microsandbox, PathBuf, String)> {
-    // Get the target path, defaulting to current directory if none specified
+    // 获取目标路径，如果未指定则默认为当前目录
     let project_dir = project_dir.unwrap_or_else(|| Path::new("."));
     let canonical_project_dir = fs::canonicalize(project_dir).await?;
 
-    // Validate the config file path
+    // 验证配置文件路径
     let config_file = config_file.unwrap_or(MICROSANDBOX_CONFIG_FILENAME);
     let _ = PathSegment::try_from(config_file)?;
     let full_config_path = canonical_project_dir.join(config_file);
 
-    // Check if config file exists
+    // 检查配置文件是否存在
     if !full_config_path.exists() {
         return Err(MicrosandboxError::MicrosandboxConfigNotFound(
             project_dir.display().to_string(),
         ));
     }
 
-    // Read and parse the config file
+    // 读取和解析配置文件
     let config_contents = fs::read_to_string(&full_config_path).await?;
     let config: Microsandbox = serde_yaml::from_str(&config_contents)?;
 
     Ok((config, canonical_project_dir, config_file.to_string()))
 }
 
-/// Resolves the paths for a Microsandbox configuration.
+/// 解析 Microsandbox 配置的路径
 ///
-/// This function is similar to `load_config` but without actually loading the file.
-/// It just resolves the paths that would be used.
+/// 此函数类似于 `load_config`，但不实际加载文件。
+/// 它只解析将使用的路径。
 ///
-/// ## Arguments
+/// ## 参数
+/// * `project_dir` - 可选的项目目录路径（默认为当前目录）
+/// * `config_file` - 可选的配置文件路径（默认为标准文件名）
 ///
-/// * `project_dir` - Optional path to the project directory. If None, defaults to current directory
-/// * `config_file` - Optional path to the Microsandbox config file. If None, uses default filename
-///
-/// ## Returns
-///
-/// Returns a tuple containing:
-/// - The canonical project directory path
-/// - The config file name
-/// - The full config file path
+/// ## 返回值
+/// 返回包含以下内容的元组：
+/// - 规范化的项目目录路径
+/// - 配置文件名称
+/// - 完整的配置文件路径
 pub async fn resolve_config_paths(
     project_dir: Option<&Path>,
     config_file: Option<&str>,
 ) -> MicrosandboxResult<(PathBuf, String, PathBuf)> {
-    // Get the target path, defaulting to current directory if none specified
+    // 获取目标路径，如果未指定则默认为当前目录
     let project_dir = project_dir.unwrap_or_else(|| Path::new("."));
     let canonical_project_dir = fs::canonicalize(project_dir).await?;
 
-    // Validate the config file path
+    // 验证配置文件路径
     let config_file = config_file.unwrap_or(MICROSANDBOX_CONFIG_FILENAME);
     let _ = PathSegment::try_from(config_file)?;
     let full_config_path = canonical_project_dir.join(config_file);
 
-    // Check if config file exists
+    // 检查配置文件是否存在
     if !full_config_path.exists() {
         return Err(MicrosandboxError::MicrosandboxConfigNotFound(
             project_dir.display().to_string(),
@@ -482,38 +508,36 @@ pub async fn resolve_config_paths(
     ))
 }
 
-/// Applies defaults from an OCI image configuration to a sandbox configuration.
+/// 将 OCI 镜像配置的默认值应用到沙箱配置
 ///
-/// This function enhances the sandbox configuration with defaults from the OCI image
-/// configuration when they are not explicitly defined in the sandbox config.
+/// 当沙箱配置中未显式定义时，此函数使用 OCI 镜像配置中的默认值
+/// 来增强沙箱配置。
 ///
-/// The following defaults are applied:
-/// - Script: Uses the entrypoint and cmd from the image if a script is missing
-/// - Environment variables: Combines image env variables with sandbox env variables
-/// - Working directory: Uses the image's working directory if not specified
-/// - Exposed ports: Combines image exposed ports with sandbox ports
+/// 应用以下默认值：
+/// - **脚本** - 如果缺少脚本，使用镜像的 entrypoint 和 cmd
+/// - **环境变量** - 将镜像环境变量与沙箱环境变量合并
+/// - **工作目录** - 如果未指定，使用镜像的工作目录
+/// - **暴露端口** - 将镜像暴露的端口与沙箱端口合并
 ///
-/// ## Arguments
+/// ## 参数
+/// * `sandbox_config` - 要增强的沙箱配置的可变引用
+/// * `reference` - OCI 镜像引用
+/// * `oci_db` - OCI 数据库连接池
 ///
-/// * `sandbox_config` - Mutable reference to the sandbox configuration to enhance
-/// * `reference` - OCI image reference to get defaults from
-/// * `script_name` - The name of the script we're trying to run
-///
-/// ## Returns
-///
-/// Returns `Ok(())` if defaults were successfully applied, or a `MicrosandboxError` if:
-/// - The image configuration could not be retrieved
-/// - Any conversion or parsing operations fail
+/// ## 返回值
+/// 如果成功应用默认值返回 `Ok(())`，或 `MicrosandboxError` 如果：
+/// - 无法检索镜像配置
+/// - 任何转换或解析操作失败
 pub async fn apply_image_defaults(
     sandbox_config: &mut Sandbox,
     reference: &Reference,
     oci_db: &Pool<Sqlite>,
 ) -> MicrosandboxResult<()> {
-    // Get the image configuration
+    // 获取镜像配置
     if let Some(config) = db::get_image_config(oci_db, &reference.to_string()).await? {
         tracing::info!("applying defaults from image configuration");
 
-        // Apply working directory if not set in sandbox
+        // 如果沙箱中未设置，应用工作目录
         if sandbox_config.get_workdir().is_none()
             && let Some(workdir) = config.config_working_dir
         {
@@ -522,7 +546,7 @@ pub async fn apply_image_defaults(
             sandbox_config.workdir = Some(workdir_path);
         }
 
-        // Combine environment variables
+        // 合并环境变量
         if let Some(config_env_json) = config.config_env_json
             && let Ok(image_env_vars) = serde_json::from_str::<Vec<String>>(&config_env_json)
         {
@@ -534,18 +558,18 @@ pub async fn apply_image_defaults(
             }
             tracing::debug!("image env vars: {:#?}", image_env_pairs);
 
-            // Combine image env vars with sandbox env vars (image vars come first)
+            // 将镜像环境变量与沙箱环境变量合并（镜像变量在前）
             let mut combined_env = image_env_pairs;
             combined_env.extend_from_slice(sandbox_config.get_envs());
             sandbox_config.envs = combined_env;
         }
 
-        // Apply entrypoint and cmd as command if no command is defined
+        // 如果未定义命令，应用 entrypoint 和 cmd 作为命令
         if sandbox_config.get_command().is_empty() {
             let mut command_vec: Vec<String> = Vec::new();
             let mut has_entrypoint_or_cmd = false;
 
-            // Try to use entrypoint and cmd from image config
+            // 尝试使用镜像配置中的 entrypoint 和 cmd
             if let Some(entrypoint_json) = &config.config_entrypoint_json
                 && let Ok(entrypoint) = serde_json::from_str::<Vec<String>>(entrypoint_json)
                 && !entrypoint.is_empty()
@@ -553,7 +577,7 @@ pub async fn apply_image_defaults(
                 has_entrypoint_or_cmd = true;
                 command_vec = entrypoint;
 
-                // Add CMD args if they exist
+                // 如果存在则添加 CMD 参数
                 if let Some(cmd_json) = &config.config_cmd_json
                     && let Ok(cmd) = serde_json::from_str::<Vec<String>>(cmd_json)
                     && !cmd.is_empty()
@@ -571,18 +595,18 @@ pub async fn apply_image_defaults(
                 tracing::debug!("cmd exec content: {:?}", command_vec);
             }
 
-            // If we found an entrypoint or cmd, set it as the command
+            // 如果找到了 entrypoint 或 cmd，将其设置为命令
             if has_entrypoint_or_cmd {
                 tracing::debug!("setting command to: {:?}", command_vec);
                 sandbox_config.command = command_vec;
             } else if let Some(shell_value) = &sandbox_config.shell {
-                // If no entrypoint or cmd, use shell as fallback command
+                // 如果没有 entrypoint 或 cmd，使用 shell 作为后备命令
                 tracing::debug!("using shell as fallback command");
                 sandbox_config.command = vec![shell_value.clone()];
             }
         }
 
-        // Combine exposed ports
+        // 合并暴露的端口
         if let Some(exposed_ports_json) = &config.config_exposed_ports_json
             && let Ok(exposed_ports_map) =
                 serde_json::from_str::<serde_json::Value>(exposed_ports_json)
@@ -591,15 +615,15 @@ pub async fn apply_image_defaults(
             let mut additional_ports = Vec::new();
 
             for port_key in exposed_ports_obj.keys() {
-                // Port keys in OCI format are like "80/tcp"
+                // OCI 格式中的端口键如 "80/tcp"
                 if let Some(container_port) = port_key.split('/').next()
                     && let Ok(port_num) = container_port.parse::<u16>()
                 {
-                    // Create a port mapping from host port to container port
-                    // We'll use the same port on both sides
+                    // 创建从主机端口到容器端口的端口映射
+                    // 我们使用两侧相同的端口
                     let port_pair = format!("{}:{}", port_num, port_num).parse::<PortPair>();
                     if let Ok(port_pair) = port_pair {
-                        // Only add if not already defined in sandbox config
+                        // 仅当沙箱配置中未定义时才添加
                         let existing_ports = sandbox_config.get_ports();
                         if !existing_ports
                             .iter()
@@ -613,7 +637,7 @@ pub async fn apply_image_defaults(
 
             tracing::debug!("additional ports: {:?}", additional_ports);
 
-            // Add new ports to existing ones
+            // 将新端口添加到现有端口
             let mut combined_ports = sandbox_config.get_ports().to_vec();
             combined_ports.extend(additional_ports);
             sandbox_config.ports = combined_ports;

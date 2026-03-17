@@ -1,9 +1,27 @@
-//! Database management for Microsandbox.
+//! Microsandbox 数据库管理模块
 //!
-//! This module provides database functionality for Microsandbox, managing both sandbox
-//! and OCI (Open Container Initiative) related data. It handles database initialization,
-//! migrations, and operations for storing and retrieving container images, layers,
-//! and sandbox configurations.
+//! 本模块提供了 Microsandbox 的数据库功能，管理沙箱和 OCI（Open Container Initiative）相关数据。
+//! 它处理数据库初始化、迁移，以及容器镜像、层和沙箱配置的存储和检索。
+//!
+//! ## 主要功能
+//!
+//! - **数据库初始化** - 创建 SQLite 数据库并运行迁移
+//! - **沙箱管理** - 保存、更新、查询沙箱记录
+//! - **OCI 数据管理** - 存储镜像、清单、配置和层信息
+//! - **连接池管理** - 高效管理数据库连接
+//!
+//! ## 数据库结构
+//!
+//! ### 沙箱数据库 (sandbox.db)
+//! - `sandboxes` - 沙箱运行时信息表
+//! - `sandbox_metrics` - 沙箱指标表
+//!
+//! ### OCI 数据库 (oci.db)
+//! - `images` - 镜像信息表
+//! - `manifests` - 镜像清单表
+//! - `configs` - 镜像配置表
+//! - `layers` - 镜像层表
+//! - `manifest_layers` - 清单 - 层关联表
 
 use std::path::Path;
 
@@ -23,58 +41,79 @@ use crate::{
 };
 
 //--------------------------------------------------------------------------------------------------
-// Constants
+// 常量定义
 //--------------------------------------------------------------------------------------------------
 
-/// Migrator for the sandbox database
+/// 沙箱数据库迁移器
+/// 包含沙箱数据库表结构的迁移脚本
 pub static SANDBOX_DB_MIGRATOR: Migrator = sqlx::migrate!("lib/migrations/sandbox");
 
-/// Migrator for the OCI database
+/// OCI 数据库迁移器
+/// 包含 OCI 相关表的迁移脚本
 pub static OCI_DB_MIGRATOR: Migrator = sqlx::migrate!("lib/migrations/oci");
 
 //--------------------------------------------------------------------------------------------------
-// Functions
+// 函数实现
 //--------------------------------------------------------------------------------------------------
 
-/// Initializes a new SQLite database if it doesn't already exist at the specified path.
+/// 初始化新的 SQLite 数据库
 ///
-/// ## Arguments
+/// 如果指定路径的数据库不存在，则创建一个新的数据库并运行迁移。
+/// 此函数确保父目录存在，创建数据库文件，然后应用所有迁移。
 ///
-/// * `db_path` - Path where the SQLite database file should be created
-/// * `migrator` - SQLx migrator containing database schema migrations to run
+/// ## 参数
+/// * `db_path` - SQLite 数据库文件的创建路径
+/// * `migrator` - 包含数据库模式迁移的 SQLx 迁移器
+///
+/// ## 返回值
+/// * `Ok(Pool<Sqlite>)` - 返回数据库连接池
+/// * `Err(MicrosandboxError)` - 创建或迁移失败
+///
+/// ## 注意事项
+/// 此函数会：
+/// 1. 确保父目录存在
+/// 2. 创建空的数据库文件
+/// 3. 创建连接池
+/// 4. 运行所有迁移
 pub async fn initialize(
     db_path: impl AsRef<Path>,
     migrator: &Migrator,
 ) -> MicrosandboxResult<Pool<Sqlite>> {
     let db_path = db_path.as_ref();
 
-    // Ensure parent directory exists
+    // 确保父目录存在
     if let Some(parent) = db_path.parent() {
         fs::create_dir_all(parent).await?;
     }
 
-    // Create an empty database file if it doesn't exist
+    // 如果数据库文件不存在，创建一个空文件
     if !db_path.exists() {
         fs::File::create(&db_path).await?;
     }
 
-    // Create database connection pool
+    // 创建数据库连接池
     let pool = SqlitePoolOptions::new()
         .max_connections(5)
         .connect(&format!("sqlite://{}?mode=rwc", db_path.display()))
         .await?;
 
-    // Run migrations
+    // 运行迁移
     migrator.run(&pool).await?;
 
     Ok(pool)
 }
 
-/// Creates and returns a connection pool for SQLite database operations.
+/// 创建并返回 SQLite 数据库连接池
 ///
-/// This function initializes a new SQLite connection pool with specified configuration parameters
-/// for managing database connections efficiently. The pool is configured with a maximum of 5
-/// concurrent connections.
+/// 此函数初始化一个新的 SQLite 连接池，用于管理数据库连接。
+/// 连接池最大并发连接数配置为 5。
+///
+/// ## 参数
+/// * `db_path` - SQLite 数据库文件路径
+///
+/// ## 返回值
+/// * `Ok(Pool<Sqlite>)` - 返回连接池
+/// * `Err(MicrosandboxError)` - 连接失败
 pub async fn get_pool(db_path: impl AsRef<Path>) -> MicrosandboxResult<Pool<Sqlite>> {
     let db_path = db_path.as_ref();
     let pool = SqlitePoolOptions::new()
@@ -85,31 +124,48 @@ pub async fn get_pool(db_path: impl AsRef<Path>) -> MicrosandboxResult<Pool<Sqli
     Ok(pool)
 }
 
-/// Gets an existing database connection pool or creates a new one if the database doesn't exist.
+/// 获取现有数据库连接池或创建新的连接池
 ///
-/// This function combines database initialization and pool creation into a single operation.
-/// If the database doesn't exist, it will be created and migrations will be run before
-/// returning the connection pool.
+/// 此函数将数据库初始化和连接池创建合并为单个操作。
+/// 如果数据库不存在，将创建数据库并运行迁移后返回连接池。
 ///
-/// ## Arguments
+/// ## 参数
+/// * `db_path` - SQLite 数据库文件路径
+/// * `migrator` - 包含数据库模式迁移的 SQLx 迁移器
 ///
-/// * `db_path` - Path to the SQLite database file
-/// * `migrator` - SQLx migrator containing database schema migrations to run
+/// ## 返回值
+/// * `Ok(Pool<Sqlite>)` - 返回连接池
+/// * `Err(MicrosandboxError)` - 初始化或连接失败
 pub async fn get_or_create_pool(
     db_path: impl AsRef<Path>,
     migrator: &Migrator,
 ) -> MicrosandboxResult<Pool<Sqlite>> {
-    // Initialize the database if it doesn't exist
+    // 如果数据库不存在则初始化
     initialize(&db_path, migrator).await
 }
 
 //--------------------------------------------------------------------------------------------------
-// Functions: Sandboxes
+// 函数：沙箱操作
 //--------------------------------------------------------------------------------------------------
 
-/// Saves or updates a sandbox in the database and returns its ID.
-/// If a sandbox with the same name and config_file exists, it will be updated.
-/// Otherwise, a new sandbox record will be created.
+/// 保存或更新数据库中的沙箱记录并返回其 ID
+///
+/// 如果存在同名和配置文件的沙箱，则更新它；否则创建新记录。
+/// 此函数使用 upsert 模式（update or insert）确保沙箱记录的唯一性。
+///
+/// ## 参数
+/// * `pool` - 数据库连接池
+/// * `name` - 沙箱名称
+/// * `config_file` - 配置文件路径
+/// * `config_last_modified` - 配置文件最后修改时间
+/// * `status` - 沙箱状态（如 "RUNNING"、"STOPPED"）
+/// * `supervisor_pid` - Supervisor 进程 ID
+/// * `microvm_pid` - MicroVM 进程 ID
+/// * `rootfs_paths` - 根文件系统路径
+///
+/// ## 返回值
+/// * `Ok(i64)` - 沙箱记录的 ID
+/// * `Err(MicrosandboxError)` - 数据库操作失败
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn save_or_update_sandbox(
     pool: &Pool<Sqlite>,
@@ -134,7 +190,7 @@ pub(crate) async fn save_or_update_sandbox(
         modified_at: Utc::now(),
     };
 
-    // Try to update first
+    // 首先尝试更新
     let update_result = sqlx::query(
         r#"
         UPDATE sandboxes
@@ -162,7 +218,7 @@ pub(crate) async fn save_or_update_sandbox(
         tracing::debug!("updated existing sandbox record");
         Ok(record.get::<i64, _>("id"))
     } else {
-        // If no record was updated, insert a new one
+        // 如果没有记录被更新，则插入新记录
         tracing::debug!("creating new sandbox record");
         let record = sqlx::query(
             r#"
@@ -188,6 +244,7 @@ pub(crate) async fn save_or_update_sandbox(
     }
 }
 
+/// 获取指定名称和配置文件的沙箱记录
 pub(crate) async fn get_sandbox(
     pool: &Pool<Sqlite>,
     name: &str,
@@ -224,7 +281,10 @@ pub(crate) async fn get_sandbox(
     }))
 }
 
-/// Updates the status of a sandbox identified by name and config file
+/// 更新沙箱的状态
+///
+/// 通过名称和配置文件标识沙箱，将其状态更新为指定值。
+/// 此函数通常在沙箱启动或停止时调用。
 pub(crate) async fn update_sandbox_status(
     pool: &Pool<Sqlite>,
     name: &str,
@@ -248,7 +308,7 @@ pub(crate) async fn update_sandbox_status(
     Ok(())
 }
 
-/// Gets all sandboxes associated with a specific config file
+/// 获取与特定配置文件关联的所有运行中沙箱
 pub(crate) async fn get_running_config_sandboxes(
     pool: &Pool<Sqlite>,
     config_file: &str,
@@ -288,7 +348,7 @@ pub(crate) async fn get_running_config_sandboxes(
         .collect())
 }
 
-/// Deletes a sandbox from the database by name and config file.
+/// 从数据库中删除沙箱记录
 pub(crate) async fn delete_sandbox(
     pool: &Pool<Sqlite>,
     name: &str,
@@ -309,17 +369,17 @@ pub(crate) async fn delete_sandbox(
 }
 
 //--------------------------------------------------------------------------------------------------
-// Functions: Images
+// 函数：镜像操作
 //--------------------------------------------------------------------------------------------------
 
-/// Saves an image to the database and returns its ID
+/// 保存镜像到数据库并返回其 ID
 pub(crate) async fn save_image(
     pool: &Pool<Sqlite>,
     reference: &str,
     size_bytes: i64,
 ) -> MicrosandboxResult<i64> {
     let image = Image {
-        id: 0, // Will be set by the database
+        id: 0, // 将由数据库设置
         reference: reference.to_string(),
         size_bytes,
         last_used_at: Some(Utc::now()),
@@ -342,14 +402,14 @@ pub(crate) async fn save_image(
     Ok(record.get::<i64, _>("id"))
 }
 
-/// Saves an image manifest to the database and returns its ID
+/// 保存镜像清单到数据库并返回其 ID
 pub(crate) async fn save_manifest(
     pool: &Pool<Sqlite>,
     image_id: i64,
     manifest: &OciImageManifest,
 ) -> MicrosandboxResult<i64> {
     let manifest_model = Manifest {
-        id: 0, // Will be set by the database
+        id: 0, // 将由数据库设置
         image_id,
         schema_version: manifest.schema_version as i64,
         media_type: manifest
@@ -385,21 +445,21 @@ pub(crate) async fn save_manifest(
     Ok(record.get::<i64, _>("id"))
 }
 
-/// Saves an image configuration to the database
+/// 保存镜像配置到数据库
 pub(crate) async fn save_config(
     pool: &Pool<Sqlite>,
     manifest_id: i64,
     config: &ConfigFile,
 ) -> MicrosandboxResult<i64> {
     let config_model = Config {
-        id: 0, // Will be set by the database
+        id: 0, // 将由数据库设置
         manifest_id,
         media_type: MediaType::ImageConfig.to_string(),
         created: config.created,
         architecture: config.architecture.to_string(),
         os: config.os.to_string(),
-        // os_variant isn't in the formal spec, and is up to the implementer.
-        // Since we don't need it, we skip it for backward compatibility.
+        // os_variant 不在正式规范中，由实现者自行决定
+        // 由于我们不需要它，为了向后兼容性跳过它
         os_variant: None,
         config_env_json: config
             .config
@@ -474,7 +534,7 @@ pub(crate) async fn save_config(
     Ok(record.get::<i64, _>("id"))
 }
 
-/// Saves an image layer to the database
+/// 保存镜像层到数据库
 pub(crate) async fn save_layer(
     pool: &Pool<Sqlite>,
     media_type: &str,
@@ -483,7 +543,7 @@ pub(crate) async fn save_layer(
     diff_id: &str,
 ) -> MicrosandboxResult<i64> {
     let layer_model = Layer {
-        id: 0, // Will be set by the database
+        id: 0, // 将由数据库设置
         media_type: media_type.to_string(),
         digest: digest.to_string(),
         diff_id: diff_id.to_string(),
@@ -511,9 +571,10 @@ pub(crate) async fn save_layer(
     Ok(record.get::<i64, _>("id"))
 }
 
-/// Saves or updates a layer in the database.
-/// If the layer exists, it updates the size_bytes and other fields.
-/// If it doesn't exist, creates a new record.
+/// 保存或更新数据库中的层记录
+///
+/// 如果层存在，更新 size_bytes 和其他字段；
+/// 如果不存在，创建新记录。
 pub(crate) async fn save_or_update_layer(
     pool: &Pool<Sqlite>,
     media_type: &str,
@@ -522,7 +583,7 @@ pub(crate) async fn save_or_update_layer(
     diff_id: &str,
 ) -> MicrosandboxResult<i64> {
     let layer_model = Layer {
-        id: 0, // Will be set by the database
+        id: 0, // 将由数据库设置
         media_type: media_type.to_string(),
         digest: digest.to_string(),
         diff_id: diff_id.to_string(),
@@ -531,7 +592,7 @@ pub(crate) async fn save_or_update_layer(
         modified_at: Utc::now(),
     };
 
-    // Try to update first
+    // 首先尝试更新
     let update_result = sqlx::query(
         r#"
         UPDATE layers
@@ -553,12 +614,12 @@ pub(crate) async fn save_or_update_layer(
     if let Some(record) = update_result {
         Ok(record.get::<i64, _>("id"))
     } else {
-        // If no record was updated, insert a new one
+        // 如果没有记录被更新，则插入新记录
         save_layer(pool, media_type, digest, size_bytes, diff_id).await
     }
 }
 
-/// Associates a layer with a manifest in the manifest_layers join table
+/// 在 manifest_layers 关联表中将层与清单关联
 pub(crate) async fn save_manifest_layer(
     pool: &Pool<Sqlite>,
     manifest_id: i64,
@@ -580,7 +641,7 @@ pub(crate) async fn save_manifest_layer(
     if let Some(record) = record {
         Ok(record.get::<i64, _>("id"))
     } else {
-        // If no record was inserted (because it already exists), fetch the existing ID
+        // 如果没有插入记录（因为已存在），则获取现有 ID
         let record = sqlx::query(
             r#"
             SELECT id FROM manifest_layers
@@ -596,7 +657,7 @@ pub(crate) async fn save_manifest_layer(
     }
 }
 
-/// Gets all layers for an image from the database.
+/// 从数据库获取镜像的所有层
 pub async fn get_image_layers(
     pool: &Pool<Sqlite>,
     reference: &str,
@@ -631,7 +692,7 @@ pub async fn get_image_layers(
         .collect())
 }
 
-/// Checks if an image exists in the database.
+/// 检查镜像是否存在于数据库中
 pub(crate) async fn image_exists(pool: &Pool<Sqlite>, reference: &str) -> MicrosandboxResult<bool> {
     let record = sqlx::query(
         r#"
@@ -647,20 +708,18 @@ pub(crate) async fn image_exists(pool: &Pool<Sqlite>, reference: &str) -> Micros
     Ok(record.get::<i64, _>("count") > 0)
 }
 
-/// Gets the configuration for an image from the database.
+/// 从数据库获取镜像的配置
 ///
-/// This function retrieves the configuration details for a specified image reference.
-/// It includes information like architecture, OS, environment variables, command,
-/// working directory, and other container configuration metadata.
+/// 此函数检索指定镜像引用的配置详情，
+/// 包括架构、操作系统、环境变量、命令、
+/// 工作目录和其他容器配置元数据。
 ///
-/// ## Arguments
+/// ## 参数
+/// * `pool` - SQLite 连接池
+/// * `reference` - OCI 镜像引用字符串（如 "ubuntu:latest"）
 ///
-/// * `pool` - SQLite connection pool
-/// * `reference` - OCI image reference string (e.g., "ubuntu:latest")
-///
-/// ## Returns
-///
-/// Returns a `MicrosandboxResult` containing either the image `Config` or an error
+/// ## 返回值
+/// 返回 `MicrosandboxResult`，包含镜像 `Config` 或错误
 pub(crate) async fn get_image_config(
     pool: &Pool<Sqlite>,
     reference: &str,
@@ -709,15 +768,16 @@ pub(crate) async fn get_image_config(
     }))
 }
 
-/// Saves or updates an image in the database.
-/// If the image exists, it updates the size_bytes and last_used_at.
-/// If it doesn't exist, creates a new record.
+/// 保存或更新镜像到数据库
+///
+/// 如果镜像存在，更新 size_bytes 和 last_used_at；
+/// 如果不存在，创建新记录。
 pub(crate) async fn save_or_update_image(
     pool: &Pool<Sqlite>,
     reference: &str,
     size_bytes: i64,
 ) -> MicrosandboxResult<i64> {
-    // Try to update first
+    // 首先尝试更新
     let update_result = sqlx::query(
         r#"
         UPDATE images
@@ -734,17 +794,12 @@ pub(crate) async fn save_or_update_image(
     if let Some(record) = update_result {
         Ok(record.get::<i64, _>("id"))
     } else {
-        // If no record was updated, insert a new one
+        // 如果没有记录被更新，则插入新记录
         save_image(pool, reference, size_bytes).await
     }
 }
 
-/// Gets a layer from the database by its digest value.
-///
-/// ## Arguments
-///
-/// * `pool` - SQLite connection pool
-/// * `digest` - Layer digest string to search for
+/// 通过 digest 值从数据库获取层
 pub(crate) async fn get_layer_by_digest(
     pool: &Pool<Sqlite>,
     digest: &str,
@@ -753,20 +808,18 @@ pub(crate) async fn get_layer_by_digest(
     Ok(layers.pop())
 }
 
-/// Gets layers from the database by their digest values.
+/// 通过 digest 值从数据库获取多个层
 ///
-/// This function retrieves layer information for a list of digest values without
-/// requiring a manifest relationship. This is useful for checking if specific layers
-/// exist in the database before trying to download them.
+/// 此函数检索与 digest 值列表匹配的层信息，
+/// 不需要清单关系。这在尝试下载特定层之前
+/// 检查它们是否存在于数据库中非常有用。
 ///
-/// ## Arguments
+/// ## 参数
+/// * `pool` - SQLite 连接池
+/// * `digests` - 要搜索的层 digest 字符串列表
 ///
-/// * `pool` - SQLite connection pool
-/// * `digests` - List of layer digest strings to search for
-///
-/// ## Returns
-///
-/// Returns a `MicrosandboxResult` containing a vector of `Layer` objects that match the provided digests
+/// ## 返回值
+/// 返回 `MicrosandboxResult`，包含与提供的 digest 匹配的 `Layer` 对象向量
 pub(crate) async fn get_layers_by_digest(
     pool: &Pool<Sqlite>,
     digests: &[String],
@@ -775,7 +828,7 @@ pub(crate) async fn get_layers_by_digest(
         return Ok(Vec::new());
     }
 
-    // Create placeholders for the IN clause (?,?,?)
+    // 为 IN 子句创建占位符 (?,?,?)
     let placeholders = (0..digests.len())
         .map(|_| "?")
         .collect::<Vec<_>>()
@@ -790,7 +843,7 @@ pub(crate) async fn get_layers_by_digest(
         placeholders
     );
 
-    // Build the query with the dynamic number of parameters
+    // 使用动态参数数量构建查询
     let mut query_builder = sqlx::query(&query);
     for digest in digests {
         query_builder = query_builder.bind(digest);
@@ -812,19 +865,17 @@ pub(crate) async fn get_layers_by_digest(
         .collect())
 }
 
-/// Gets all layer digests for an image manifest from the database.
+/// 从数据库获取镜像清单的所有层 digest
 ///
-/// This function retrieves just the digest strings for all layers associated with a specific
-/// image reference. This is useful for checking if layers exist without needing the full layer details.
+/// 此函数检索与特定镜像引用关联的所有层的 digest 字符串。
+/// 这对于在不需要完整层详情的情况下检查层是否存在非常有用。
 ///
-/// ## Arguments
+/// ## 参数
+/// * `pool` - SQLite 连接池
+/// * `reference` - OCI 镜像引用字符串（如 "ubuntu:latest"）
 ///
-/// * `pool` - SQLite connection pool
-/// * `reference` - OCI image reference string (e.g., "ubuntu:latest")
-///
-/// ## Returns
-///
-/// Returns a `MicrosandboxResult` containing a vector of layer digest strings
+/// ## 返回值
+/// 返回 `MicrosandboxResult`，包含层 digest 字符串向量
 pub(crate) async fn get_image_layer_digests(
     pool: &Pool<Sqlite>,
     reference: &str,
@@ -850,28 +901,26 @@ pub(crate) async fn get_image_layer_digests(
         .collect())
 }
 
-/// Associates a layer with a manifest in the database.
+/// 在数据库中将层与清单关联
 ///
-/// If the layer doesn't exist, it will be created first, before being
-/// linked to the manifest.
+/// 如果层不存在，将先创建层记录，然后再
+/// 将其链接到清单。
 ///
-/// ## Arguments
+/// ## 参数
+/// * `pool` - SQLite 连接池
+/// * `layer` - OCI 层描述符
+/// * `diff_id` - 层的 Diff ID
+/// * `manifest_id` - 要链接层的清单 ID
 ///
-/// * `pool` - SQLite connection pool
-/// * `layer` - OCI layer descriptor
-/// * `diff_id` - Diff ID of the layer
-/// * `manifest_id` - ID of the manifest to link the layer to
-///
-/// ## Returns
-///
-/// Returns the ID of the manifest layer if successful.
+/// ## 返回值
+/// 如果成功，返回清单层 ID
 pub(crate) async fn create_or_update_manifest_layer(
     pool: &Pool<Sqlite>,
     layer: &OciDescriptor,
     diff_id: &str,
     manifest_id: i64,
 ) -> MicrosandboxResult<i64> {
-    // if None, it means the layer doesn't exist in database yet
+    // 如果为 None，表示层还不存在于数据库中
     let db_layer_id = get_layer_by_digest(pool, &layer.digest.to_string())
         .await?
         .map(|l| l.id);
@@ -884,12 +933,12 @@ pub(crate) async fn create_or_update_manifest_layer(
         }
     };
 
-    // finally, link the layer to the manifest
+    // 最后，将层链接到清单
     save_manifest_layer(pool, manifest_id, db_layer_id).await
 }
 
 //--------------------------------------------------------------------------------------------------
-// Tests
+// 测试
 //--------------------------------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -900,17 +949,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_init_sandbox_db() -> MicrosandboxResult<()> {
-        // Create temporary directory
+        // 创建临时目录
         let temp_dir = tempdir()?;
         let db_path = temp_dir.path().join("test_sandbox.db");
 
-        // Initialize database
+        // 初始化数据库
         initialize(&db_path, &SANDBOX_DB_MIGRATOR).await?;
 
-        // Test database connection
+        // 测试数据库连接
         let pool = get_pool(&db_path).await?;
 
-        // Verify tables exist by querying them
+        // 通过查询验证表存在
         let tables = sqlx::query("SELECT name FROM sqlite_master WHERE type='table'")
             .fetch_all(&pool)
             .await?;
@@ -934,17 +983,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_init_oci_db() -> MicrosandboxResult<()> {
-        // Create temporary directory
+        // 创建临时目录
         let temp_dir = tempdir()?;
         let db_path = temp_dir.path().join("test_oci.db");
 
-        // Initialize database
+        // 初始化数据库
         initialize(&db_path, &OCI_DB_MIGRATOR).await?;
 
-        // Test database connection
+        // 测试数据库连接
         let pool = get_pool(&db_path).await?;
 
-        // Verify tables exist by querying them
+        // 通过查询验证表存在
         let tables = sqlx::query("SELECT name FROM sqlite_master WHERE type='table'")
             .fetch_all(&pool)
             .await?;
@@ -976,18 +1025,18 @@ mod tests {
 }
 
 //--------------------------------------------------------------------------------------------------
-// Functions: Helpers
+// 辅助函数
 //--------------------------------------------------------------------------------------------------
 
-/// Parses a SQLite datetime string (in "YYYY-MM-DD HH:MM:SS" format) to a DateTime<Utc>.
+/// 将 SQLite 日期时间字符串（格式为 "YYYY-MM-DD HH:MM:SS"）解析为 DateTime<Utc>
 fn parse_sqlite_datetime(s: &str) -> DateTime<Utc> {
     let naive_dt = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
         .unwrap_or_else(|e| panic!("Failed to parse datetime string '{}': {:?}", s, e));
     DateTime::from_naive_utc_and_offset(naive_dt, Utc)
 }
 
-/// Sometimes the json columns in the database can have literal "null" values.
-/// This function converts those to None.
+/// 有时数据库中的 json 列可能有字面量 "null" 值
+/// 此函数将它们转换为 None
 fn null_to_none(value: Option<String>) -> Option<String> {
     value.filter(|v| v != "null")
 }

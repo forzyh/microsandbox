@@ -1,8 +1,26 @@
-//! Home directory management for Microsandbox.
+//! Microsandbox 主目录管理模块
 //!
-//! This module provides functionality for managing the global microsandbox home directory,
-//! which contains cached images, layers, and databases. It also includes functions for
-//! cleaning up the home directory and checking its existence.
+//! 本模块提供了管理全局 microsandbox 主目录的功能，
+//! 该目录包含缓存的镜像、层和数据库。
+//! 它还包括清理主目录和检查其存在的功能。
+//!
+//! ## 主要功能
+//!
+//! - **主目录管理** - 创建和管理 microsandbox 主目录结构
+//! - **沙箱安装** - 从 OCI 镜像安装沙箱并创建别名脚本
+//! - **沙箱卸载** - 移除已安装的沙箱别名
+//! - **清理功能** - 清理主目录中的所有数据
+//!
+//! ## 目录结构
+//!
+//! ```text
+//! ~/.microsandbox/
+//! ├── installs/          # 安装的沙箱配置
+//! │   └── .menv/         # 沙箱数据库
+//! ├── oci/               # OCI 镜像缓存
+//! ├── layers/            # 镜像层缓存
+//! └── *.db               # 数据库文件
+//! ```
 
 use crate::{
     MicrosandboxError, MicrosandboxResult,
@@ -22,7 +40,7 @@ use tokio::fs;
 use typed_path::Utf8UnixPathBuf;
 
 //--------------------------------------------------------------------------------------------------
-// Constants
+// 常量定义
 //--------------------------------------------------------------------------------------------------
 
 #[cfg(feature = "cli")]
@@ -32,40 +50,46 @@ const REMOVE_HOME_DIR_MSG: &str = "Remove microsandbox home";
 const INSTALL_SANDBOX_MSG: &str = "Install sandbox";
 
 //--------------------------------------------------------------------------------------------------
-// Functions
+// 函数实现
 //--------------------------------------------------------------------------------------------------
 
-/// Clean up the global microsandbox home directory
+/// 清理全局 microsandbox 主目录
 ///
-/// This removes the entire microsandbox home directory and all its contents, effectively
-/// cleaning up all global microsandbox data including cached images, layers, and databases.
+/// 此函数移除整个 microsandbox 主目录及其所有内容，
+/// 有效清理所有全局 microsandbox 数据，包括缓存的镜像、层和数据库。
 ///
-/// ## Arguments
-/// * `force` - Whether to force cleaning even if configuration files exist
+/// ## 参数
+/// * `force` - 是否强制清理，即使存在配置文件
 ///
-/// ## Example
+/// ## 示例
 /// ```no_run
 /// use microsandbox_core::management::home;
 ///
 /// # async fn example() -> anyhow::Result<()> {
-/// // Clean with force = true to remove everything regardless of configs
+/// // force = true 时无条件删除所有内容
 /// home::clean(true).await?;
 /// # Ok(())
 /// # }
 /// ```
+///
+/// ## 处理逻辑
+/// 1. 获取主目录路径
+/// 2. 检查是否存在配置文件
+/// 3. 如果存在配置文件且未强制，则跳过清理
+/// 4. 如果强制或无配置文件，删除整个目录
 pub async fn clean(force: bool) -> MicrosandboxResult<()> {
-    // Get the microsandbox home path from environment or default
+    // 从环境变量或默认值获取 microsandbox 主目录路径
     let home_path = env::get_microsandbox_home_path();
     let installs_path = home_path.join(INSTALLS_SUBDIR);
 
     #[cfg(feature = "cli")]
     let remove_home_dir_sp = term::create_spinner(REMOVE_HOME_DIR_MSG.to_string(), None, None);
 
-    // Check if installs directory exists and has config files
+    // 检查 installs 目录是否存在且有配置文件
     if installs_path.exists() {
         let config_path = installs_path.join(MICROSANDBOX_CONFIG_FILENAME);
 
-        // If config file exists and force is false, don't clean
+        // 如果配置文件存在且未强制，不清理
         if config_path.exists() && !force {
             #[cfg(feature = "cli")]
             term::finish_with_error(&remove_home_dir_sp);
@@ -85,9 +109,9 @@ pub async fn clean(force: bool) -> MicrosandboxResult<()> {
         }
     }
 
-    // Check if home directory exists
+    // 检查主目录是否存在
     if home_path.exists() {
-        // Remove the home directory and all its contents
+        // 删除主目录及其所有内容
         fs::remove_dir_all(&home_path).await?;
         tracing::info!(
             "Removed microsandbox home directory at {}",
@@ -106,34 +130,34 @@ pub async fn clean(force: bool) -> MicrosandboxResult<()> {
     Ok(())
 }
 
-/// Install a sandbox from an image and create an alias script for it
+/// 从镜像安装沙箱并为其创建别名脚本
 ///
-/// This function creates a permanent sandbox configuration in the global microsandbox
-/// home directory and sets up an alias script that can be used to run the sandbox.
+/// 此函数在全局 microsandbox 主目录中创建永久的沙箱配置，
+/// 并设置一个别名脚本，可用于运行沙箱。
 ///
-/// ## Arguments
-/// * `image` - The OCI image reference to use as the base for the sandbox
-/// * `script` - The name of the script to execute within the sandbox
-/// * `alias` - The alias name to use for the script, if not provided, the script name is used
-/// * `cpus` - Optional number of virtual CPUs to allocate to the sandbox
-/// * `memory` - Optional amount of memory in MiB to allocate to the sandbox
-/// * `volumes` - List of volume mappings in the format "host_path:guest_path"
-/// * `ports` - List of port mappings in the format "host_port:guest_port"
-/// * `envs` - List of environment variables in the format "KEY=VALUE"
-/// * `workdir` - Optional working directory path inside the sandbox
-/// * `scope` - Optional network scope for the sandbox
-/// * `exec` - Optional command to execute within the sandbox
-/// * `args` - Additional arguments to pass to the command
-/// * `use_image_defaults` - Whether to apply default settings from the OCI image configuration
+/// ## 参数
+/// * `image` - 用作沙箱基础的 OCI 镜像引用
+/// * `script` - 要在沙箱中执行的脚本名称
+/// * `alias` - 用于脚本的别名名称，如果未提供则使用脚本名称
+/// * `cpus` - 可选的分配给沙箱的虚拟 CPU 数量
+/// * `memory` - 可选的分配给沙箱的内存大小（MiB）
+/// * `volumes` - 卷映射列表，格式为 "host_path:guest_path"
+/// * `ports` - 端口映射列表，格式为 "host_port:guest_port"
+/// * `envs` - 环境变量列表，格式为 "KEY=VALUE"
+/// * `workdir` - 可选的沙箱内工作目录路径
+/// * `scope` - 可选的沙箱网络范围
+/// * `exec` - 可选的在沙箱中执行的命令
+/// * `args` - 要传递给命令的额外参数
+/// * `use_image_defaults` - 是否应用 OCI 镜像配置的默认设置
 ///
-/// ## Returns
-/// Returns `Ok(())` if the sandbox is successfully installed, or a `MicrosandboxError` if:
-/// - The image cannot be pulled or found
-/// - The sandbox configuration is invalid
-/// - The filesystem operations fail
-/// - There is a name conflict with an existing system command
+/// ## 返回值
+/// 如果沙箱安装成功返回 `Ok(())`，否则返回 `MicrosandboxError`：
+/// - 镜像无法拉取或找不到
+/// - 沙箱配置无效
+/// - 文件系统操作失败
+/// - 与现有系统命令名称冲突
 ///
-/// ## Example
+/// ## 示例
 /// ```no_run
 /// use microsandbox_core::oci::Reference;
 /// use microsandbox_core::management::home;
@@ -142,27 +166,27 @@ pub async fn clean(force: bool) -> MicrosandboxResult<()> {
 /// # async fn example() -> anyhow::Result<()> {
 /// let image = "ubuntu:latest".parse::<Reference>()?;
 ///
-/// // Install Ubuntu sandbox with custom name and resources
+/// // 安装带有自定义名称和资源的 Ubuntu 沙箱
 /// home::install(
 ///     &image,
-///     Some("shell"),          // Run shell script
-///     Some("ubuntu-shell"),   // Custom alias
-///     Some(2),                // 2 CPUs
-///     Some(1024),             // 1GB RAM
-///     vec![                   // Mount host's /tmp to sandbox's /data
+///     Some("shell"),          // 运行 shell 脚本
+///     Some("ubuntu-shell"),   // 自定义别名
+///     Some(2),                // 2 个 CPU
+///     Some(1024),             // 1GB 内存
+///     vec![                   // 将主机的 /tmp 挂载到沙箱的 /data
 ///         "/tmp:/data".to_string()
 ///     ],
-///     vec![                   // Map host port 8080 to sandbox port 80
+///     vec![                   // 将主机端口 8080 映射到沙箱端口 80
 ///         "8080:80".to_string()
 ///     ],
-///     vec![                   // Set environment variables
+///     vec![                   // 设置环境变量
 ///         "DEBUG=1".to_string()
 ///     ],
-///     Some("/app".into()),    // Set working directory
-///     Some("local".to_string()), // Set network scope
-///     None,                   // No exec command
-///     vec![],                 // No additional args
-///     true                    // Use image defaults
+///     Some("/app".into()),    // 设置工作目录
+///     Some("local".to_string()), // 设置网络范围
+///     None,                   // 无 exec 命令
+///     vec![],                 // 无额外参数
+///     true                    // 使用镜像默认值
 /// ).await?;
 /// # Ok(())
 /// # }
@@ -183,14 +207,14 @@ pub async fn install(
     args: Vec<String>,
     use_image_defaults: bool,
 ) -> MicrosandboxResult<()> {
-    // Get the microsandbox home path
+    // 获取 microsandbox 主目录路径
     let home_path = env::get_microsandbox_home_path();
     let installs_path = home_path.join(INSTALLS_SUBDIR);
 
-    // Determine the alias name to use:
-    // 1. Use the provided alias if specified
-    // 2. Use the script name if provided
-    // 3. Otherwise extract a name from the image reference
+    // 确定要使用的别名名称：
+    // 1. 如果指定则使用提供的别名
+    // 2. 如果提供了则使用脚本名称
+    // 3. 否则从镜像引用中提取名称
     let alias_name = alias
         .map(|a| a.to_string())
         .or_else(|| script.map(|s| s.to_string()))
@@ -198,21 +222,21 @@ pub async fn install(
 
     tracing::info!("Setting up alias: {}", alias_name);
 
-    // Check if a command with this name already exists in the system PATH
+    // 检查系统 PATH 中是否已存在同名命令
     if command_exists(&alias_name) {
         return Err(MicrosandboxError::CommandExists(alias_name));
     }
 
-    // Initialize .menv in the installs directory if it doesn't exist
-    // This creates necessary directories and the sandbox database
+    // 在 installs 目录中初始化 .menv（如果不存在）
+    // 这会创建必要的目录和沙箱数据库
     menv::initialize(Some(installs_path.clone())).await?;
 
-    // Parse the volume, port, and env strings into their respective types
+    // 解析 volume、port 和 env 字符串为各自的类型
     let volumes: Vec<PathPair> = volumes.into_iter().filter_map(|v| v.parse().ok()).collect();
     let ports: Vec<PortPair> = ports.into_iter().filter_map(|p| p.parse().ok()).collect();
     let envs: Vec<EnvPair> = envs.into_iter().filter_map(|e| e.parse().ok()).collect();
 
-    // Build the sandbox configuration
+    // 构建沙箱配置
     let mut sandbox = {
         let mut b = Sandbox::builder().image(ReferenceOrPath::Reference(image.clone()));
 
@@ -247,21 +271,21 @@ pub async fn install(
         b.build()
     };
 
-    // Apply image configuration defaults if enabled
+    // 如果启用了镜像配置默认值则应用
     if use_image_defaults {
-        // Pull the image from the registry if not already pulled
+        // 如果镜像尚未拉取，则从注册表拉取
         Image::pull(image.clone(), None).await?;
 
-        // Get the OCI database path and create a connection pool
+        // 获取 OCI 数据库路径并创建连接池
         let db_path = home_path.join(OCI_DB_FILENAME);
         let oci_pool = db::get_or_create_pool(&db_path, &db::OCI_DB_MIGRATOR).await?;
 
-        // Apply image defaults to the sandbox configuration
+        // 将镜像默认值应用到沙箱配置
         config::apply_image_defaults(&mut sandbox, image, &oci_pool).await?;
         tracing::debug!("applied image defaults to sandbox config");
     }
 
-    // Create spinner for CLI feedback
+    // 为 CLI 反馈创建 spinner
     #[cfg(feature = "cli")]
     let install_sandbox_sp = term::create_spinner(
         format!("{} from '{}'", INSTALL_SANDBOX_MSG, image),
@@ -269,7 +293,7 @@ pub async fn install(
         None,
     );
 
-    // Override the exec command if provided
+    // 如果提供了则覆盖 exec 命令
     if let Some(exec) = exec {
         let mut command = Vec::with_capacity(args.len() + 1);
         command.push(exec.to_string());
@@ -277,29 +301,29 @@ pub async fn install(
         sandbox.set_command(command);
     }
 
-    // Create the microsandbox config with the sandbox
+    // 创建带有沙箱的 microsandbox 配置
     let config = Microsandbox::builder()
         .sandboxes([(alias_name.clone(), sandbox)])
         .build_unchecked();
 
-    // Write the config to the installs directory
+    // 将配置写入 installs 目录
     let config_path = installs_path.join(MICROSANDBOX_CONFIG_FILENAME);
     fs::write(&config_path, serde_yaml::to_string(&config)?).await?;
     tracing::info!("Wrote config to {}", config_path.display());
 
-    // Create the alias script in ~/.local/bin
+    // 在 ~/.local/bin 中创建别名脚本
     let bin_dir = XDG_HOME_DIR.join(XDG_BIN_DIR);
 
-    // Create the bin directory if it doesn't exist
+    // 如果 bin 目录不存在则创建
     fs::create_dir_all(&bin_dir).await?;
 
     let script_path = bin_dir.join(&alias_name);
     let script_content = generate_alias_script(&alias_name, script);
 
-    // Write the script file
+    // 写入脚本文件
     fs::write(&script_path, script_content).await?;
 
-    // Make the script executable
+    // 使脚本可执行
     let mut perms = std::fs::metadata(&script_path)?.permissions();
     perms.set_mode(0o755); // rwxr-xr-x
     std::fs::set_permissions(&script_path, perms)?;
@@ -312,37 +336,36 @@ pub async fn install(
     Ok(())
 }
 
-/// Uninstall a script alias from the local bin directory
+/// 从本地 bin 目录卸载脚本别名
 ///
-/// This function removes a script alias that was previously installed using `install`.
-/// It only removes scripts that contain the "MSB-ALIAS" marker to ensure it doesn't
-/// delete unrelated files.
+/// 此函数移除之前使用 `install` 安装的脚本别名。
+/// 它只移除包含 "MSB-ALIAS" 标记的脚本，以确保不会删除无关文件。
 ///
-/// ## Arguments
-/// * `script_name` - The name of the script to uninstall. This should match the alias name.
+/// ## 参数
+/// * `script_name` - 要卸载的脚本名称。这应该与别名名称匹配。
 ///
-/// ## Returns
-/// Returns `Ok(())` if the script is successfully uninstalled, or a `MicrosandboxError` if:
-/// - The script doesn't exist in the bin directory
-/// - The script doesn't contain the MSB-ALIAS marker
-/// - The file system operations fail
+/// ## 返回值
+/// 如果脚本成功卸载返回 `Ok(())`，否则返回 `MicrosandboxError`：
+/// - 脚本在 bin 目录中不存在
+/// - 脚本不包含 MSB-ALIAS 标记
+/// - 文件系统操作失败
 ///
-/// ## Example
+/// ## 示例
 /// ```no_run
 /// use microsandbox_core::management::home;
 ///
 /// # async fn example() -> anyhow::Result<()> {
-/// // Uninstall the "ubuntu-shell" script
+/// // 卸载 "ubuntu-shell" 脚本
 /// home::uninstall("ubuntu-shell").await?;
 /// # Ok(())
 /// # }
 /// ```
 pub async fn uninstall(script_name: &str) -> MicrosandboxResult<()> {
-    // Get the bin directory path
+    // 获取 bin 目录路径
     let bin_dir = XDG_HOME_DIR.join(XDG_BIN_DIR);
     let script_path = bin_dir.join(script_name);
 
-    // Check if the script exists
+    // 检查脚本是否存在
     if !script_path.exists() {
         return Err(MicrosandboxError::PathNotFound(format!(
             "Script '{}' not found at {}",
@@ -351,10 +374,10 @@ pub async fn uninstall(script_name: &str) -> MicrosandboxResult<()> {
         )));
     }
 
-    // Read the script file
+    // 读取脚本文件内容
     let script_content = fs::read_to_string(&script_path).await?;
 
-    // Check if it's a microsandbox alias script (contains MSB-ALIAS marker)
+    // 检查是否是 microsandbox 别名脚本（包含 MSB-ALIAS 标记）
     if !script_content.contains("# MSB-ALIAS:") {
         return Err(MicrosandboxError::InvalidArgument(format!(
             "Script '{}' is not a microsandbox alias (missing MSB-ALIAS marker)",
@@ -362,7 +385,7 @@ pub async fn uninstall(script_name: &str) -> MicrosandboxResult<()> {
         )));
     }
 
-    // Extract the alias name from the script for verification
+    // 从脚本中提取别名名称进行验证
     let alias_marker = format!("# MSB-ALIAS: {}", script_name);
     if !script_content.contains(&alias_marker) {
         tracing::warn!(
@@ -371,7 +394,7 @@ pub async fn uninstall(script_name: &str) -> MicrosandboxResult<()> {
         );
     }
 
-    // All checks passed, remove the script
+    // 所有检查通过，删除脚本
     fs::remove_file(&script_path).await?;
     tracing::info!("Removed alias script: {}", script_path.display());
 
@@ -379,19 +402,19 @@ pub async fn uninstall(script_name: &str) -> MicrosandboxResult<()> {
 }
 
 //--------------------------------------------------------------------------------------------------
-// Functions: Helpers
+// 辅助函数
 //--------------------------------------------------------------------------------------------------
 
-/// Check if a command with the given name exists in the system PATH
+/// 检查给定名称的命令是否存在于系统 PATH 中
 ///
-/// This function uses `which` to check if a command exists in any directory
-/// listed in the PATH environment variable.
+/// 此函数使用 `which` 命令检查命令是否存在于
+/// PATH 环境变量列出的任何目录中。
 ///
-/// ## Arguments
-/// * `command` - The name of the command to check
+/// ## 参数
+/// * `command` - 要检查的命令名称
 ///
-/// ## Returns
-/// Returns `true` if the command exists in PATH, `false` otherwise
+/// ## 返回值
+/// 如果命令存在于 PATH 中返回 `true`，否则返回 `false`
 fn command_exists(command: &str) -> bool {
     use std::process::Command;
 
@@ -402,19 +425,19 @@ fn command_exists(command: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Extracts a simple name from an OCI image reference
+/// 从 OCI 镜像引用中提取简单名称
 ///
-/// For example:
+/// 例如：
 /// - "docker.io/library/ubuntu:latest" -> "ubuntu"
 /// - "registry.com/org/app:v1.0" -> "app"
 /// - "myapp:stable" -> "myapp"
 fn extract_name_from_reference(reference: &Reference) -> String {
     let image_str = reference.to_string();
 
-    // Split the image string by '/' and take the last part
+    // 通过 '/' 分割镜像字符串并取最后一部分
     let name_with_tag = image_str.rsplit('/').next().unwrap_or(&image_str);
 
-    // Split by ':' to remove the tag and take the first part
+    // 通过 ':' 分割以移除标签并取第一部分
     name_with_tag
         .split(':')
         .next()
@@ -422,7 +445,7 @@ fn extract_name_from_reference(reference: &Reference) -> String {
         .to_string()
 }
 
-/// Generate the content for the alias script based on the alias name and optional script.
+/// 根据别名名称和可选脚本生成别名脚本内容
 fn generate_alias_script(alias: &str, script: Option<&str>) -> String {
     let run_command = if let Some(script_name) = script {
         format!(
