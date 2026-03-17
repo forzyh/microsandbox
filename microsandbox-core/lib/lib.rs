@@ -1,42 +1,44 @@
-//! `microsandbox` is a secure MicroVM provisioning system for running untrusted code in isolated environments.
+//! # microsandbox-core 库
 //!
-//! # Overview
+//! `microsandbox` 是一个安全的微虚拟机 (MicroVM) 配置系统，用于在隔离环境中运行不可信代码。
 //!
-//! microsandbox provides a robust foundation for running AI workloads in isolated microVMs. It handles:
-//! - VM lifecycle management
-//! - OCI image distribution and management
-//! - Service orchestration and coordination
-//! - Resource constraints and monitoring
-//! - Database persistence for system state
+//! ## 概述
 //!
-//! # Key Features
+//! microsandbox 为在隔离的微虚拟机中运行 AI 工作负载提供了坚实的基础。它主要处理以下内容：
+//! - **VM 生命周期管理**：创建、启动、停止和销毁微虚拟机
+//! - **OCI 镜像分发和管理**：从容器注册表拉取和管理容器镜像
+//! - **服务编排和协调**：管理多个沙箱的依赖关系和启动顺序
+//! - **资源约束和监控**：对 CPU、内存和网络进行细粒度控制
+//! - **数据库持久化**：使用 SQLite 存储系统状态和元数据
 //!
-//! - **Secure Isolation**: True VM-level isolation through microVMs
-//! - **Container Experience**: Works with standard OCI/Docker images
-//! - **Fast Startup**: Millisecond-level VM provisioning
-//! - **Resource Control**: Fine-grained CPU, memory and network limits
-//! - **Simple API**: RESTful interface for service management
-//! - **Persistence**: Database-backed state management
+//! ## 关键特性
 //!
-//! # Architecture
+//! - **安全隔离**：通过微虚拟机实现真正的 VM 级别隔离，比容器更安全
+//! - **容器体验**：与标准 OCI/Docker 镜像兼容，可以使用现有的容器生态
+//! - **快速启动**：毫秒级别的 VM 配置速度，几乎和容器一样快
+//! - **资源控制**：精细的 CPU、内存和网络限制
+//! - **简单 API**：用于服务管理的 RESTful 接口
+//! - **持久化**：基于数据库的状态管理，重启后状态不丢失
 //!
-//! microsandbox consists of several key components:
+//! ## 架构组成
 //!
-//! - **VM**: Low-level microVM configuration and management
-//! - **OCI**: Image pulling, layer handling, and registry interactions
-//! - **Management**: Orchestration, sandbox lifecycle, and coordination
-//! - **Runtime**: Process supervision and monitoring
-//! - **Models**: Database and persistence schema
+//! microsandbox 由以下几个关键组件组成：
 //!
-//! # Modules
+//! - **VM 模块**：底层微虚拟机配置和管理，基于 libkrun
+//! - **OCI 模块**：镜像拉取、层处理和注册表交互
+//! - **Management 模块**：编排、沙箱生命周期和协调
+//! - **Runtime 模块**：进程监督和监控
+//! - **Models 模块**：数据库和持久化模式
 //!
-//! - [`config`] - Configuration types and validation
-//! - [`management`] - Central management for sandboxes, images, and orchestration
-//! - [`models`] - Database models and persistence schema
-//! - [`oci`] - OCI image and registry operations
-//! - [`runtime`] - Process supervision and monitoring
-//! - [`utils`] - Common utilities and helpers
-//! - [`vm`] - MicroVM configuration and control
+//! ## 模块说明
+//!
+//! - [`config`] - 配置类型和验证逻辑
+//! - [`management`] - 沙箱、镜像和编排的中心管理系统
+//! - [`models`] - 数据库模型和持久化模式
+//! - [`oci`] - OCI 镜像和注册表操作
+//! - [`runtime`] - 进程监督和监控
+//! - [`utils`] - 通用工具函数和辅助代码
+//! - [`vm`] - 微虚拟机配置和控制
 
 #![warn(missing_docs)]
 

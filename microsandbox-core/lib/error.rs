@@ -1,3 +1,8 @@
+//! # 错误处理模块
+//!
+//! 本模块定义了 microsandbox 项目中使用的各种错误类型。
+//! 使用 `thiserror` crate 来提供美观的错误调试输出和自动的 `From` trait 实现。
+
 use microsandbox_utils::MicrosandboxUtilsError;
 use oci_client::errors::OciDistributionError;
 use sqlx::migrate::MigrateError;
@@ -10,334 +15,421 @@ use std::{
 use thiserror::Error;
 
 //--------------------------------------------------------------------------------------------------
-// Types
+// 类型定义
 //--------------------------------------------------------------------------------------------------
 
-/// The result of a microsandbox-related operation.
+/// microsandbox 相关操作的结果类型别名
+///
+/// 这是一个泛型类型，`T` 是成功时返回的值类型
+/// 错误类型固定为 `MicrosandboxError`
+///
+/// ## 使用示例
+/// ```rust
+/// use microsandbox_core::{MicrosandboxResult, MicrosandboxError};
+///
+/// fn do_something() -> MicrosandboxResult<String> {
+///     // 成功时返回 Ok
+///     Ok("success".to_string())
+///     // 或者失败时返回 Err(MicrosandboxError::...)
+/// }
+/// ```
 pub type MicrosandboxResult<T> = Result<T, MicrosandboxError>;
 
-/// An error that occurred during a file system operation.
+/// microsandbox 操作中可能发生的错误
+///
+/// 这个枚举包含了所有可能的错误情况，使用 `#[from]` 属性可以自动
+/// 将其他错误类型转换为 `MicrosandboxError`
 #[derive(pretty_error_debug::Debug, Error)]
 pub enum MicrosandboxError {
-    /// An I/O error.
-    #[error("io error: {0}")]
+    /// I/O 错误（来自标准库的 std::io::Error）
+    ///
+    /// 这个错误变体使用 `#[from]` 属性，意味着任何 `std::io::Error` 都可以
+    /// 自动转换为这个错误类型，无需手动调用 `.into()`
+    #[error("io 错误：{0}")]
     Io(#[from] std::io::Error),
 
-    /// An error that can represent any error.
+    /// 可以表示任何错误的通用错误类型
+    ///
+    /// 使用 `anyhow::Error` 作为后备错误类型，用于处理无法归入其他
+    /// 特定类别的错误
     #[error(transparent)]
     AnyError(#[from] anyhow::Error),
 
-    /// An error that occurred during an OCI distribution operation.
-    #[error("oci distribution error: {0}")]
+    /// OCI 分发操作中发生的错误
+    ///
+    /// OCI (Open Container Initiative) 是容器镜像的标准规范
+    /// 这个错误在从容器注册表拉取镜像时可能发生
+    #[error("oci 分发错误：{0}")]
     OciDistribution(#[from] OciDistributionError),
 
-    /// An error that occurred during an HTTP request.
-    #[error("http request error: {0}")]
+    /// HTTP 请求过程中发生的错误
+    ///
+    /// 使用 `reqwest` crate 进行 HTTP 通信，这个错误在访问
+    /// 容器注册表 API 时可能发生
+    #[error("http 请求错误：{0}")]
     HttpRequest(#[from] reqwest::Error),
 
-    /// An error that occurred during an HTTP middleware operation.
-    #[error("http middleware error: {0}")]
+    /// HTTP 中间件操作中发生的错误
+    ///
+    /// 使用 `reqwest_middleware` 提供额外的 HTTP 功能，如重试、认证等
+    #[error("http 中间件错误：{0}")]
     HttpMiddleware(#[from] reqwest_middleware::Error),
 
-    /// An error that occurred during a database operation.
-    #[error("database error: {0}")]
+    /// 数据库操作中发生的错误
+    ///
+    /// 使用 `sqlx` 异步 SQL 数据库操作，主要是 SQLite
+    #[error("数据库错误：{0}")]
     Database(#[from] sqlx::Error),
 
-    /// An error that occurred when a manifest was not found.
-    #[error("manifest not found")]
+    /// 未找到 manifest 时的错误
+    ///
+    /// manifest 是 OCI 镜像的元数据文件，描述了镜像的层和配置
+    #[error("manifest 未找到")]
     ManifestNotFound,
 
-    /// An error that occurred when a join handle returned an error.
-    #[error("join error: {0}")]
+    /// join handle 返回错误时的错误
+    ///
+    /// 在使用 `tokio::spawn` 创建异步任务后，等待任务完成时可能收到此错误
+    #[error("join 错误：{0}")]
     JoinError(#[from] tokio::task::JoinError),
 
-    /// An error that occurred when an unsupported image hash algorithm was used.
-    #[error("unsupported image hash algorithm: {0}")]
+    /// 使用了不支持的镜像哈希算法
+    ///
+    /// OCI 镜像支持多种哈希算法（如 SHA-256、SHA-384、SHA-512）
+    /// 当遇到不支持的算法时会返回此错误
+    #[error("不支持的镜像哈希算法：{0}")]
     UnsupportedImageHashAlgorithm(String),
 
-    /// An error that occurred when an image layer download failed.
-    #[error("image layer download failed: {0}")]
+    /// 镜像层下载失败
+    ///
+    /// OCI 镜像由多个层组成，每个层是一个压缩的文件系统快照
+    /// 下载任一层失败都会导致此错误
+    #[error("镜像层下载失败：{0}")]
     ImageLayerDownloadFailed(String),
 
-    /// An error that occurred when an invalid path pair was used.
-    #[error("invalid path pair: {0}")]
+    /// 使用了无效的路径对 (PathPair)
+    ///
+    /// PathPair 用于表示主机和访客系统之间的路径映射
+    /// 格式为 "host_path:guest_path"
+    #[error("无效的路径对：{0}")]
     InvalidPathPair(String),
 
-    /// An error that occurred when an invalid port pair was used.
-    #[error("invalid port pair: {0}")]
+    /// 使用了无效的端口对 (PortPair)
+    ///
+    /// PortPair 用于表示主机和访客系统之间的端口映射
+    /// 格式为 "host_port:guest_port"
+    #[error("无效的端口对：{0}")]
     InvalidPortPair(String),
 
-    /// An error that occurred when an invalid environment variable pair was used.
-    #[error("invalid environment variable pair: {0}")]
+    /// 使用了无效的环境变量对
+    ///
+    /// 环境变量对格式为 "NAME=value"
+    #[error("无效的环境变量对：{0}")]
     InvalidEnvPair(String),
 
-    /// An error that occurred when an invalid MicroVm configuration was used.
-    #[error("invalid MicroVm configuration: {0}")]
+    /// MicroVm 配置无效时发生的错误
+    #[error("无效的 MicroVm 配置：{0}")]
     InvalidMicroVMConfig(InvalidMicroVMConfigError),
 
-    /// An error that occurred when an invalid resource limit format was used.
-    #[error("invalid resource limit format: {0}")]
+    /// 资源限制格式无效
+    ///
+    /// Linux 资源限制格式为 "RESOURCE=soft:hard"
+    /// 例如 "RLIMIT_NOFILE=1024:2048"
+    #[error("无效的资源限制格式：{0}")]
     InvalidRLimitFormat(String),
 
-    /// An error that occurred when an invalid resource limit value was used.
-    #[error("invalid resource limit value: {0}")]
+    /// 资源限制值无效
+    #[error("无效的资源限制值：{0}")]
     InvalidRLimitValue(String),
 
-    /// An error that occurred when an invalid resource limit resource was used.
-    #[error("invalid resource limit resource: {0}")]
+    /// 资源限制资源类型无效
+    #[error("无效的资源限制资源：{0}")]
     InvalidRLimitResource(String),
 
-    /// An error that occurred when a Serde JSON error occurred.
-    #[error("serde json error: {0}")]
+    /// Serde JSON 序列化/反序列化错误
+    #[error("serde json 错误：{0}")]
     SerdeJson(#[from] serde_json::Error),
 
-    /// An error that occurred when a Serde YAML error occurred.
-    #[error("serde yaml error: {0}")]
+    /// Serde YAML 序列化/反序列化错误
+    #[error("serde yaml 错误：{0}")]
     SerdeYaml(#[from] serde_yaml::Error),
 
-    /// An error that occurred when a TOML error occurred.
-    #[error("toml error: {0}")]
+    /// TOML 解析错误
+    #[error("toml 错误：{0}")]
     Toml(#[from] toml::de::Error),
 
-    /// An error that occurred when a configuration validation error occurred.
-    #[error("configuration validation error: {0}")]
+    /// 配置验证失败
+    #[error("配置验证错误：{0}")]
     ConfigValidation(String),
 
-    /// An error that occurred when a configuration validation error occurred.
-    #[error("configuration validation errors: {0:?}")]
+    /// 多个配置验证错误
+    #[error("配置验证错误：{0:?}")]
     ConfigValidationErrors(Vec<String>),
 
-    /// An error that occurs when trying to access group resources for a service that has no group
-    #[error("service '{0}' belongs to no group")]
+    /// 尝试访问不属于任何组的服务的资源时的错误
+    #[error("服务 '{0}' 不属于任何组")]
     ServiceBelongsToNoGroup(String),
 
-    /// An error that occurs when trying to access group resources for a service that belongs to a
-    /// different group.
-    #[error("service '{0}' belongs to wrong group: '{1}'")]
+    /// 尝试访问属于不同组的服务的资源时的错误
+    #[error("服务 '{0}' 属于错误的组：'{1}'")]
     ServiceBelongsToWrongGroup(String, String),
 
-    /// An error that occurred when failed to get shutdown eventfd
-    #[error("failed to get shutdown eventfd: {0}")]
+    /// 无法获取关机 eventfd
+    ///
+    /// eventfd 是 Linux 用于事件通知的文件描述符
+    #[error("无法获取关机 eventfd: {0}")]
     FailedToGetShutdownEventFd(i32),
 
-    /// An error that occurred when failed to write to shutdown eventfd
-    #[error("failed to write to shutdown eventfd: {0}")]
+    /// 无法写入关机 eventfd
+    #[error("无法写入关机 eventfd: {0}")]
     FailedToShutdown(String),
 
-    /// An error that occurred when failed to start VM
-    #[error("failed to start VM: {0}")]
+    /// 启动 VM 失败
+    #[error("启动 VM 失败：{0}")]
     FailedToStartVM(i32),
 
-    /// An error that occurred when a path does not exist
-    #[error("path does not exist: {0}")]
+    /// 路径不存在
+    #[error("路径不存在：{0}")]
     PathNotFound(String),
 
-    /// An error that occurred when a rootfs path does not exist
-    #[error("rootfs path does not exist: {0}")]
+    /// rootfs 路径不存在
+    ///
+    /// rootfs (root filesystem) 是容器的根文件系统
+    #[error("rootfs 路径不存在：{0}")]
     RootFsPathNotFound(String),
 
-    /// An error that occurred when the supervisor binary was not found
-    #[error("supervisor binary not found: {0}")]
+    /// 未找到 supervisor 二进制文件
+    ///
+    /// supervisor 是监督和管理沙箱进程的程序
+    #[error("supervisor 二进制文件未找到：{0}")]
     SupervisorBinaryNotFound(String),
 
-    /// An error that occurred when failed to start VM
-    #[error("failed to start VM: {0}")]
+    /// 启动 VM 失败（备用错误类型）
+    #[error("启动 VM 失败：{0}")]
     StartVmFailed(i32),
 
-    /// An error that occurred when waiting for a process to exit
-    #[error("process wait error: {0}")]
+    /// 等待进程退出时发生错误
+    #[error("进程等待错误：{0}")]
     ProcessWaitError(String),
 
-    /// An error that occurred running the supervisor.
-    #[error("supervisor error: {0}")]
+    /// 运行 supervisor 时发生错误
+    #[error("supervisor 错误：{0}")]
     SupervisorError(String),
 
-    /// An error that occurred when failed to kill process
-    #[error("failed to kill process: {0}")]
+    /// 终止进程失败
+    #[error("无法终止进程：{0}")]
     ProcessKillError(String),
 
-    /// An error that occurred when merging configurations
-    #[error("configuration merge error: {0}")]
+    /// 配置合并时发生错误
+    #[error("配置合并错误：{0}")]
     ConfigMerge(String),
 
-    /// An error that occurred when no more IP addresses are available for assignment
-    #[error("no available IP addresses in the pool")]
+    /// 没有更多可分配的 IP 地址
+    ///
+    /// 当 IP 地址池耗尽时返回此错误
+    #[error("没有可用的 IP 地址")]
     NoAvailableIPs,
 
-    /// An error that occurred during a walkdir operation
-    #[error("walkdir error: {0}")]
+    /// walkdir 操作中发生错误
+    ///
+    /// walkdir 用于递归遍历目录树
+    #[error("walkdir 错误：{0}")]
     WalkDir(#[from] walkdir::Error),
 
-    /// An error that occurred when stripping a path prefix
-    #[error("strip prefix error: {0}")]
+    /// 移除路径前缀时发生错误
+    #[error("strip prefix 错误：{0}")]
     StripPrefix(#[from] StripPrefixError),
 
-    /// An error that occurred during a nix operation
-    #[error("nix error: {0}")]
+    /// nix crate 操作中发生错误
+    ///
+    /// nix 提供了对 POSIX 系统调用的 Rust 绑定
+    #[error("nix 错误：{0}")]
     NixError(#[from] nix::Error),
 
-    /// An error that occurred when converting system time
-    #[error("system time error: {0}")]
+    /// 系统时间转换错误
+    #[error("系统时间错误：{0}")]
     SystemTime(#[from] SystemTimeError),
 
-    /// An error that occurred during layer extraction.
-    /// This typically happens when the join handle for the blocking task fails.
-    #[error("layer extraction error: {0}")]
+    /// 层提取时发生错误
+    ///
+    /// 这通常发生在阻塞任务的 join handle 失败时
+    #[error("层提取错误：{0}")]
     LayerExtraction(String),
 
-    /// An error that occurred during layer handling operations like opening files or unpacking archives.
-    /// Contains both the underlying IO error and the path to the layer being processed.
-    #[error("layer handling error: {source}")]
+    /// 层处理操作（如打开文件或解包归档）时发生错误
+    ///
+    /// 包含底层的 I/O 错误和正在处理的层路径
+    #[error("层处理错误：{source}")]
     LayerHandling {
-        /// The underlying IO error that occurred
+        /// 底层的 I/O 错误
         source: std::io::Error,
-        /// The path to the layer being processed when the error occurred
+        /// 发生错误时正在处理的层路径
         layer: String,
     },
 
-    /// An error that occurred when a configuration file was not found
-    #[error("configuration file not found: {0}")]
+    /// 配置文件未找到
+    #[error("配置文件未找到：{0}")]
     ConfigNotFound(String),
 
-    /// Error when a service's rootfs directory is not found
-    #[error("Service rootfs not found: {0}")]
+    /// 服务的 rootfs 目录未找到
+    #[error("服务 rootfs 未找到：{0}")]
     RootfsNotFound(String),
 
-    /// An error that occurred when parsing an image reference
-    #[error("invalid image reference: {0}")]
+    /// 解析镜像引用时发生错误
+    ///
+    /// 镜像引用格式如 "docker.io/library/ubuntu:latest"
+    #[error("无效的镜像引用：{0}")]
     ImageReferenceError(String),
 
-    /// An error that occurred when trying to remove running services
-    #[error("Cannot remove running services: {0}")]
+    /// 尝试删除正在运行的服务时的错误
+    #[error("无法删除正在运行的服务：{0}")]
     ServiceStillRunning(String),
 
-    /// An error that occurred when invalid command line arguments were provided
+    /// 命令行参数无效
     #[error("{0}")]
     InvalidArgument(String),
 
-    /// An error that occurred when validating paths
-    #[error("path validation error: {0}")]
+    /// 路径验证失败
+    #[error("路径验证错误：{0}")]
     PathValidation(String),
 
-    /// An error that occurred when the microsandbox config file was not found
-    #[error("microsandbox config file not found at: {0}")]
+    /// microsandbox 配置文件未找到
+    #[error("microsandbox 配置文件未找到于：{0}")]
     MicrosandboxConfigNotFound(String),
 
-    /// An error that occurred when failed to parse configuration file
-    #[error("failed to parse configuration file: {0}")]
+    /// 解析配置文件失败
+    #[error("解析配置文件失败：{0}")]
     ConfigParseError(String),
 
-    /// An error that occurred when a log file was not found
-    #[error("log not found: {0}")]
+    /// 日志文件未找到
+    #[error("日志未找到：{0}")]
     LogNotFound(String),
 
-    /// An error that occurred when a pager error occurred
-    #[error("pager error: {0}")]
+    /// pager 错误
+    ///
+    /// pager 用于分页显示长文本输出
+    #[error("pager 错误：{0}")]
     PagerError(String),
 
-    /// An error from microsandbox-utils
-    #[error("microsandbox-utils error: {0}")]
+    /// 来自 microsandbox-utils 的错误
+    #[error("microsandbox-utils 错误：{0}")]
     MicrosandboxUtilsError(#[from] MicrosandboxUtilsError),
 
-    /// An error that occurred when a migration error occurred
-    #[error("migration error: {0}")]
+    /// 数据库迁移错误
+    #[error("迁移错误：{0}")]
     MigrationError(#[from] MigrateError),
 
-    /// An error that occurred when a feature is not yet implemented
-    #[error("feature not yet implemented: {0}")]
+    /// 功能尚未实现
+    #[error("功能尚未实现：{0}")]
     NotImplemented(String),
 
-    /// An error that occurred when a sandbox was not found in the configuration
-    #[error("cannot find sandbox: '{0}' in '{1}'")]
+    /// 在配置中找不到指定的沙箱
+    #[error("在 '{1}' 中找不到沙箱：'{0}'")]
     SandboxNotFoundInConfig(String, PathBuf),
 
-    /// An error that occurs when an invalid log level is used.
-    #[error("invalid log level: {0}")]
+    /// 使用了无效的日志级别
+    #[error("无效的日志级别：{0}")]
     InvalidLogLevel(u8),
 
-    /// Empty path segment
-    #[error("empty path segment")]
+    /// 路径段为空
+    #[error("路径段为空")]
     EmptyPathSegment,
 
-    /// Invalid path component (e.g. ".", "..", "/")
-    #[error("invalid path component: {0}")]
+    /// 路径组件无效（如 "."、".."、"/"）
+    #[error("无效的路径组件：{0}")]
     InvalidPathComponent(String),
 
-    /// Script not found in sandbox configuration
-    #[error("script '{0}' not found in sandbox configuration '{1}'")]
+    /// 在沙箱配置中找不到指定的脚本
+    #[error("在沙箱配置 '{1}' 中找不到脚本 '{0}'")]
     ScriptNotFoundInSandbox(String, String),
 
-    /// An error that occurred running the sandbox server.
-    #[error("sandbox server error: {0}")]
+    /// 运行沙箱服务器时发生错误
+    #[error("沙箱服务器错误：{0}")]
     SandboxServerError(String),
 
-    /// An error that occurred when an invalid network scope was used.
-    #[error("invalid network scope: {0}")]
+    /// 使用了无效的网络范围
+    ///
+    /// 网络范围定义了沙箱可以访问的网络地址范围
+    #[error("无效的网络范围：{0}")]
     InvalidNetworkScope(String),
 
-    /// An error that occurred when a start script or exec command or shell is missing.
-    #[error("missing start script or exec command or shell")]
+    /// 缺少启动脚本、exec 命令或 shell
+    #[error("缺少启动脚本或 exec 命令或 shell")]
     MissingStartOrExecOrShell,
 
-    /// An error that occurred when trying to install a script with the same name as an existing command.
-    #[error("command already exists: {0}")]
+    /// 尝试安装与现有命令同名的脚本
+    #[error("命令已存在：{0}")]
     CommandExists(String),
 
-    /// An error that occurred when a command was not found.
-    #[error("command not found: {0}")]
+    /// 命令未找到
+    #[error("命令未找到：{0}")]
     CommandNotFound(String),
 
-    /// An error that occurred when failed to parse OCI spec
-    #[error("failed to parse OCI spec: {0}")]
+    /// 解析 OCI 规范失败
+    #[error("解析 OCI 规范失败：{0}")]
     SpecError(#[from] oci_spec::OciSpecError),
 
-    /// An error that occurred when failed to parse OCI reference
-    #[error("failed to parse OCI reference: {0}")]
+    /// 解析 OCI 引用失败
+    #[error("解析 OCI 引用失败：{0}")]
     ParseError(#[from] oci_client::ParseError),
 }
 
-/// An error that occurred when an invalid MicroVm configuration was used.
+/// MicroVm 配置无效时的详细错误
+///
+/// 这个枚举提供了更具体的 MicroVm 配置错误原因
 #[derive(Debug, Error)]
 pub enum InvalidMicroVMConfigError {
-    /// The root path does not exist.
-    #[error("root path does not exist: {0}")]
+    /// root 路径不存在
+    #[error("root 路径不存在：{0}")]
     RootPathDoesNotExist(String),
 
-    /// A host path that should be mounted does not exist.
-    #[error("host path does not exist: {0}")]
+    /// 应该挂载的主机路径不存在
+    #[error("主机路径不存在：{0}")]
     HostPathDoesNotExist(String),
 
-    /// The number of vCPUs is zero.
-    #[error("number of vCPUs is zero")]
+    /// vCPU 数量为零
+    ///
+    /// vCPU (virtual CPU) 是分配给虚拟机的虚拟处理器数量
+    #[error("vCPU 数量为零")]
     NumVCPUsIsZero,
 
-    /// The amount of memory is zero.
-    #[error("amount of memory is zero")]
+    /// 内存大小为零
+    #[error("内存大小为零")]
     MemoryIsZero,
 
-    /// The command line contains invalid characters. Only printable ASCII characters (space through tilde) are allowed.
-    #[error(
-        "command line contains invalid characters (only ASCII characters between space and tilde are allowed): {0}"
-    )]
+    /// 命令行包含无效字符
+    ///
+    /// 只允许使用可打印的 ASCII 字符（空格到波浪线之间的字符）
+    #[error("命令行包含无效字符（只允许使用空格到波浪线之间的 ASCII 字符）：{0}")]
     InvalidCommandLineString(String),
 
-    /// An error that occurs when conflicting guest paths are detected.
-    #[error("Conflicting guest paths: '{0}' and '{1}' overlap")]
+    /// 当检测到冲突的访客路径时发生
+    ///
+    /// 例如，如果一个挂载点是 /app，另一个是 /app/data，就会产生冲突
+    #[error("冲突的访客路径：'{0}' 和 '{1}' 重叠")]
     ConflictingGuestPaths(String, String),
 }
 
-/// An error that can represent any error.
+/// 可以表示任何错误的类型
+///
+/// 这是一个包装器，内部使用 `anyhow::Error`
 #[derive(Debug)]
 pub struct AnyError {
     error: anyhow::Error,
 }
 
 //--------------------------------------------------------------------------------------------------
-// Methods
+// 方法
 //--------------------------------------------------------------------------------------------------
 
 impl AnyError {
-    /// Downcasts the error to a `T`.
+    /// 将错误向下转换为类型 `T`
+    ///
+    /// ## 参数
+    /// * `T` - 要转换到的目标错误类型
+    ///
+    /// ## 返回
+    /// 如果内部错误是指定的类型 `T`，返回 `Some(&T)`，否则返回 `None`
     pub fn downcast<T>(&self) -> Option<&T>
     where
         T: Display + fmt::Debug + Send + Sync + 'static,
@@ -347,17 +439,19 @@ impl AnyError {
 }
 
 //--------------------------------------------------------------------------------------------------
-// Functions
+// 函数
 //--------------------------------------------------------------------------------------------------
 
-/// Creates an `Ok` `MicrosandboxResult`.
+/// 创建一个 `Ok` 的 `MicrosandboxResult`
+///
+/// 这个函数只是一个辅助函数，使代码更加一致
 #[allow(non_snake_case)]
 pub fn Ok<T>(value: T) -> MicrosandboxResult<T> {
     Result::Ok(value)
 }
 
 //--------------------------------------------------------------------------------------------------
-// Trait Implementations
+// Trait 实现
 //--------------------------------------------------------------------------------------------------
 
 impl PartialEq for AnyError {

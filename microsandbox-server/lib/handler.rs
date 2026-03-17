@@ -1,19 +1,86 @@
-//! Request handlers for the microsandbox server.
+//! # 请求处理器模块 - HTTP 请求处理逻辑
 //!
-//! This module implements:
-//! - API endpoint handlers
-//! - Request processing logic
-//! - Response formatting
+//! 本模块实现了微沙箱服务器的所有 HTTP 请求处理器。
 //!
-//! The module provides:
-//! - Handler functions for API routes
-//! - Request validation and processing
-//! - Response generation and error handling
+//! ## 模块结构
+//!
+//! ```text
+//! handler.rs
+//! ├── REST API 处理器
+//! │   └── health() - 健康检查
+//! │
+//! ├── JSON-RPC 处理器
+//! │   ├── mcp_handler() - MCP 协议请求处理
+//! │   ├── json_rpc_handler() - JSON-RPC 请求分发
+//! │   └── forward_rpc_to_portal() - 转发 RPC 到 Portal
+//! │
+//! ├── 沙箱操作实现
+//! │   ├── sandbox_start_impl() - 启动沙箱
+//! │   ├── sandbox_stop_impl() - 停止沙箱
+//! │   ├── sandbox_get_metrics_impl() - 获取指标
+//! │   └── poll_sandbox_until_running() - 轮询沙箱状态
+//! │
+//! ├── 代理处理器
+//! │   ├── proxy_request() - 代理请求
+//! │   └── proxy_fallback() - 代理回退
+//! │
+//! └── 辅助函数
+//!     └── validate_sandbox_name() - 验证沙箱名称
+//! ```
+//!
+//! ## 请求处理流程
+//!
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────────┐
+//! │                      HTTP 请求                                   │
+//! └─────────────────────────────────────────────────────────────────┘
+//!                              │
+//!                              ▼
+//! ┌─────────────────────────────────────────────────────────────────┐
+//! │                        中间件层                                  │
+//! │  • logging_middleware: 记录请求日志                               │
+//! │  • auth_middleware: JWT 认证验证                                  │
+//! └─────────────────────────────────────────────────────────────────┘
+//!                              │
+//!                              ▼
+//! ┌─────────────────────────────────────────────────────────────────┐
+//! │                         路由器                                   │
+//! │  /api/v1/health → health()                                      │
+//! │  /api/v1/rpc    → json_rpc_handler()                            │
+//! │  /mcp           → mcp_handler()                                 │
+//! └─────────────────────────────────────────────────────────────────┘
+//!                              │
+//!              ┌───────────────┼───────────────┐
+//!              ▼               ▼               ▼
+//! ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐
+//! │  health()       │ │json_rpc_handler │ │  mcp_handler()  │
+//! │  返回健康状态    │ │  分发到具体方法   │ │  处理 MCP 协议    │
+//! └─────────────────┘ └─────────────────┘ └─────────────────┘
+//!                              │
+//!              ┌───────────────┼───────────────┐
+//!              ▼               ▼               ▼
+//!     sandbox.start    sandbox.repl.run   (MCP 方法)
+//!     sandbox.stop     sandbox.command.run
+//!     sandbox.metrics.get
+//! ```
+//!
+//! ## JSON-RPC 方法分类
+//!
+//! ### 本地处理方法
+//! 这些方法在服务器本地处理：
+//! - `sandbox.start`: 启动沙箱
+//! - `sandbox.stop`: 停止沙箱
+//! - `sandbox.metrics.get`: 获取沙箱指标
+//!
+//! ### 转发到 Portal 的方法
+//! 这些方法需要转发到沙箱内的 Portal 服务：
+//! - `sandbox.repl.run`: 执行 REPL 代码
+//! - `sandbox.command.run`: 执行 shell 命令
 
 use axum::{
     Json,
     body::Body,
-    debug_handler,
+    debug_handler,  // 调试处理器宏，提供更详细的错误信息
     extract::{Path, State},
     http::{Request, StatusCode},
     response::{IntoResponse, Response},
@@ -43,35 +110,87 @@ use crate::{
 };
 
 //--------------------------------------------------------------------------------------------------
-// Functions: REST API Handlers
+// 函数定义：REST API 处理器
 //--------------------------------------------------------------------------------------------------
 
-/// Handler for health check
+/// # 健康检查处理器
+///
+/// 用于负载均衡器、监控系统检查服务器健康状态。
+///
+/// ## 响应示例
+///
+/// ```json
+/// HTTP 200 OK
+/// {
+///     "message": "Service is healthy"
+/// }
+/// ```
+///
+/// ## 返回值
+///
+/// - `Ok((StatusCode::OK, Json(...)))`: 服务健康
+/// - `Err(ServerError)`: 服务异常（实际上此函数不会返回错误）
 pub async fn health() -> ServerResult<impl IntoResponse> {
     Ok((
         StatusCode::OK,
         Json(RegularMessageResponse {
-            message: "Service is healthy".to_string(),
+            message: "服务运行正常".to_string(),
         }),
     ))
 }
 
 //--------------------------------------------------------------------------------------------------
-// Functions: JSON-RPC Handlers
+// 函数定义：JSON-RPC 处理器
 //--------------------------------------------------------------------------------------------------
 
-/// Dedicated MCP handler for Model Context Protocol requests
+/// # MCP（Model Context Protocol）请求处理器
+///
+/// 处理所有发送到 `/mcp` 端点的 MCP 协议请求。
+///
+/// ## MCP 协议简介
+///
+/// MCP 是 Anthropic 定义的协议，用于 AI 助手与外部工具的交互。
+/// 本质上是 JSON-RPC 2.0 的特定应用，定义了标准化的方法和参数。
+///
+/// ## 支持的 MCP 方法
+///
+/// | 方法 | 功能 |
+/// |------|------|
+/// | `initialize` | MCP 初始化握手 |
+/// | `tools/list` | 列出可用工具 |
+/// | `tools/call` | 调用工具 |
+/// | `prompts/list` | 列出提示模板 |
+/// | `prompts/get` | 获取提示模板 |
+/// | `notifications/initialized` | 初始化完成通知 |
+///
+/// ## 参数说明
+///
+/// | 参数 | 类型 | 说明 |
+/// |------|------|------|
+/// | `state` | `State<AppState>` | 应用状态（通过 Axum 提取器注入） |
+/// | `request` | `Json<JsonRpcRequest>` | JSON-RPC 请求体 |
+///
+/// ## 返回值
+///
+/// - `Ok(JsonRpcResponseOrNotification)`: MCP 响应
+/// - `Err(ServerError)`: 处理失败
+///
+/// ## `#[debug_handler]` 宏说明
+///
+/// 这是 Axum 提供的调试宏，为处理器函数添加更详细的编译时检查
+/// 和错误信息，便于开发调试。
 #[debug_handler]
 pub async fn mcp_handler(
     State(state): State<AppState>,
     Json(request): Json<JsonRpcRequest>,
 ) -> ServerResult<impl IntoResponse> {
-    debug!(?request, "Received MCP request");
-    // Check for required JSON-RPC fields
+    debug!(?request, "收到 MCP 请求");
+
+    // 验证 JSON-RPC 版本字段
     if request.jsonrpc != JSONRPC_VERSION {
         let error = JsonRpcError {
-            code: -32600,
-            message: "Invalid or missing jsonrpc version field".to_string(),
+            code: -32600,  // JSON-RPC 标准错误码：无效请求
+            message: "jsonrpc 版本字段无效或缺失".to_string(),
             data: None,
         };
         return Ok(JsonRpcResponseOrNotification::error(
@@ -80,19 +199,19 @@ pub async fn mcp_handler(
         ));
     }
 
-    // Extract the ID before moving the request
+    // 提取请求 ID（在移动 request 之前）
     let request_id = request.id.clone();
 
-    // Handle MCP methods directly since all requests to /mcp are MCP requests
+    // 调用 MCP 模块处理方法
     match mcp::handle_mcp_method(state, request).await {
         Ok(response) => {
-            // The enum handles both regular responses and notifications
+            // 枚举自动处理响应和通知两种情况
             Ok(response)
         }
         Err(e) => {
             let error = JsonRpcError {
-                code: -32603,
-                message: format!("MCP method error: {}", e),
+                code: -32603,  // JSON-RPC 标准错误码：内部错误
+                message: format!("MCP 方法错误：{}", e),
                 data: None,
             };
             Ok(JsonRpcResponseOrNotification::error(error, request_id))
@@ -100,19 +219,47 @@ pub async fn mcp_handler(
     }
 }
 
-/// Main JSON-RPC handler that dispatches to the appropriate method
+/// # JSON-RPC 主处理器
+///
+/// 这是 `/api/v1/rpc` 端点的主入口，负责分发所有 JSON-RPC 请求到具体的处理方法。
+///
+/// ## 方法路由
+///
+/// ```text
+/// json_rpc_handler
+/// │
+/// ├─ sandbox.start → sandbox_start_impl()
+/// ├─ sandbox.stop → sandbox_stop_impl()
+/// ├─ sandbox.metrics.get → sandbox_get_metrics_impl()
+/// ├─ sandbox.repl.run → forward_rpc_to_portal()
+/// ├─ sandbox.command.run → forward_rpc_to_portal()
+/// └─ 其他方法 → 返回"方法不存在"错误
+/// ```
+///
+/// ## 参数说明
+///
+/// | 参数 | 类型 | 说明 |
+/// |------|------|------|
+/// | `state` | `State<AppState>` | 应用状态 |
+/// | `request` | `Json<JsonRpcRequest>` | JSON-RPC 请求 |
+///
+/// ## 返回值
+///
+/// 返回 Axum 响应，包含：
+/// - HTTP 状态码
+/// - JSON-RPC 响应体
 #[debug_handler]
 pub async fn json_rpc_handler(
     State(state): State<AppState>,
     Json(request): Json<JsonRpcRequest>,
 ) -> ServerResult<impl IntoResponse> {
-    debug!(?request, "Received JSON-RPC request");
+    debug!(?request, "收到 JSON-RPC 请求");
 
-    // Check for required JSON-RPC fields
+    // 验证 JSON-RPC 版本字段
     if request.jsonrpc != JSONRPC_VERSION {
         let error = JsonRpcError {
             code: -32600,
-            message: "Invalid or missing jsonrpc version field".to_string(),
+            message: "jsonrpc 版本字段无效或缺失".to_string(),
             data: None,
         };
         return Ok((
@@ -121,79 +268,83 @@ pub async fn json_rpc_handler(
         ));
     }
 
+    // 提取方法名和请求 ID
     let method = request.method.as_str();
     let id = request.id.clone();
 
+    // 根据方法名分发到不同的处理器
     match method {
-        // Server specific methods
+        // ==================== 沙箱管理方法 ====================
         "sandbox.start" => {
-            // Parse the params into a SandboxStartRequest
+            // 解析参数为 SandboxStartParams
             let start_params: SandboxStartParams =
                 serde_json::from_value(request.params.clone()).map_err(|e| {
                     ServerError::ValidationError(crate::error::ValidationError::InvalidInput(
-                        format!("Invalid params for sandbox.start: {}", e),
+                        format!("sandbox.start 参数无效：{}", e),
                     ))
                 })?;
 
-            // Call the sandbox_up_impl function
+            // 调用启动沙箱的实现函数
             let result = sandbox_start_impl(state, start_params).await?;
 
-            // Create JSON-RPC response with success
+            // 创建成功的 JSON-RPC 响应
             Ok((
                 StatusCode::OK,
                 Json(JsonRpcResponse::success(json!(result), id)),
             ))
         }
         "sandbox.stop" => {
-            // Parse the params into a SandboxStopRequest
+            // 解析参数为 SandboxStopParams
             let stop_params: SandboxStopParams = serde_json::from_value(request.params.clone())
                 .map_err(|e| {
                     ServerError::ValidationError(crate::error::ValidationError::InvalidInput(
-                        format!("Invalid params for sandbox.stop: {}", e),
+                        format!("sandbox.stop 参数无效：{}", e),
                     ))
                 })?;
 
-            // Call the sandbox_down_impl function
+            // 调用停止沙箱的实现函数
             let result = sandbox_stop_impl(state, stop_params).await?;
 
-            // Create JSON-RPC response with success
+            // 创建成功的 JSON-RPC 响应
             Ok((
                 StatusCode::OK,
                 Json(JsonRpcResponse::success(json!(result), id)),
             ))
         }
         "sandbox.metrics.get" => {
-            // Parse the params into a SandboxMetricsGetRequest
+            // 解析参数为 SandboxMetricsGetParams
             let metrics_params: SandboxMetricsGetParams =
                 serde_json::from_value(request.params.clone()).map_err(|e| {
                     ServerError::ValidationError(crate::error::ValidationError::InvalidInput(
-                        format!("Invalid params for sandbox.metrics.get: {}", e),
+                        format!("sandbox.metrics.get 参数无效：{}", e),
                     ))
                 })?;
 
-            // Call the sandbox_get_metrics_impl function with state and request
+            // 调用获取指标的实现函数
             let result = sandbox_get_metrics_impl(state.clone(), metrics_params).await?;
 
-            // Create JSON-RPC response with success
+            // 创建成功的 JSON-RPC 响应
             Ok((
                 StatusCode::OK,
                 Json(JsonRpcResponse::success(json!(result), id)),
             ))
         }
 
-        // Portal-forwarded methods
+        // ==================== 转发到 Portal 的方法 ====================
+        // 这些方法需要转发到沙箱内部的 Portal 服务处理
         "sandbox.repl.run" | "sandbox.command.run" => {
-            // Forward these RPC methods to the portal
+            // 转发 RPC 到 Portal
             match forward_rpc_to_portal(state, request).await {
                 Ok((status, json_response)) => Ok((status, json_response)),
                 Err(e) => Err(e),
             }
         }
 
+        // ==================== 未找到方法 ====================
         _ => {
             let error = JsonRpcError {
-                code: -32601,
-                message: format!("Method not found: {}", method),
+                code: -32601,  // JSON-RPC 标准错误码：方法不存在
+                message: format!("方法不存在：{}", method),
                 data: None,
             };
             Ok((
@@ -204,59 +355,111 @@ pub async fn json_rpc_handler(
     }
 }
 
-/// Forwards the JSON-RPC request to the portal service
+/// # 转发 JSON-RPC 请求到 Portal 服务
+///
+/// 此函数将特定的 RPC 请求（如代码执行、命令执行）转发到沙箱内部的 Portal 服务。
+///
+/// ## Portal 架构
+///
+/// ```text
+/// ┌─────────────────────────────────────────────────────────────────┐
+/// │                    外部客户端                                    │
+/// └─────────────────────────────────────────────────────────────────┘
+///                              │
+///                              ▼
+/// ┌─────────────────────────────────────────────────────────────────┐
+/// │              microsandbox-server                                 │
+/// │  ┌─────────────────────────────────────────────────────────┐    │
+/// │  │                  forward_rpc_to_portal()                 │    │
+/// │  │                                                           │    │
+/// │  │  1. 从请求提取沙箱名称                                     │    │
+/// │  │  2. 获取沙箱的 Portal URL（从 PortManager）                │    │
+/// │  │  3. 重试连接 Portal（最多 300 次）                          │    │
+/// │  │  4. 转发请求到 Portal                                      │    │
+/// │  │  5. 返回 Portal 响应                                       │    │
+/// │  └─────────────────────────────────────────────────────────┘    │
+/// └─────────────────────────────────────────────────────────────────┘
+///                              │
+///                              ▼
+/// ┌─────────────────────────────────────────────────────────────────┐
+/// │                    Sandbox (Docker)                              │
+/// │  ┌─────────────────────────────────────────────────────────┐    │
+/// │  │                   Portal 服务                             │    │
+/// │  │  • 接收 RPC 请求                                          │    │
+/// │  │  • 执行代码/命令                                          │    │
+/// │  │  • 返回执行结果                                           │    │
+/// │  └─────────────────────────────────────────────────────────┘    │
+/// └─────────────────────────────────────────────────────────────────┘
+/// ```
+///
+/// ## 重试机制
+///
+/// Portal 服务启动需要时间，因此实现了重试逻辑：
+/// - 最大重试次数：300 次
+/// - 每次超时：50ms
+/// - 重试间隔：10ms
+/// - 总超时时间：约 30 秒
+///
+/// ## 参数说明
+///
+/// | 参数 | 类型 | 说明 |
+/// |------|------|------|
+/// | `state` | `AppState` | 应用状态（用于获取 Portal URL） |
+/// | `request` | `JsonRpcRequest` | 要转发的 JSON-RPC 请求 |
+///
+/// ## 返回值
+///
+/// - `Ok((StatusCode, Json<JsonRpcResponse>))`: Portal 响应
+/// - `Err(ServerError)`: 转发失败
 pub async fn forward_rpc_to_portal(
     state: AppState,
     request: JsonRpcRequest,
 ) -> ServerResult<(StatusCode, Json<JsonRpcResponse>)> {
-    // Extract sandbox information from request context or method parameters
-    // The method will have the format "sandbox.repl.run" etc.
-    // The method params will have a sandbox_name parameter
-
-    // Extract the sandbox name from the parameters
+    // ==================== 1. 提取沙箱名称 ====================
+    // 从请求参数中提取 sandbox 字段
     let sandbox_name = if let Some(params) = request.params.as_object() {
         params
             .get("sandbox")
             .and_then(|v| v.as_str())
             .ok_or_else(|| {
                 ServerError::ValidationError(crate::error::ValidationError::InvalidInput(
-                    "Missing required 'sandbox' parameter for portal request".to_string(),
+                    "Portal 请求缺少必需的 'sandbox' 参数".to_string(),
                 ))
             })?
     } else {
         return Err(ServerError::ValidationError(
             crate::error::ValidationError::InvalidInput(
-                "Request parameters must be an object containing 'sandbox'".to_string(),
+                "请求参数必须是包含 'sandbox' 的对象".to_string(),
             ),
         ));
     };
 
-    // Get the portal URL specifically for this sandbox
+    // ==================== 2. 获取 Portal URL ====================
+    // 从状态中获取沙箱的 Portal URL
     let portal_url = state.get_portal_url_for_sandbox(sandbox_name).await?;
 
-    // Create a full URL to the portal's JSON-RPC endpoint
+    // 构建完整的 RPC 端点 URL 和健康检查 URL
     let portal_rpc_url = format!("{}/api/v1/rpc", portal_url);
-    // Create a health check URL
     let portal_health_url = format!("{}/health", portal_url);
 
-    debug!("Forwarding RPC to portal: {}", portal_rpc_url);
+    debug!("转发 RPC 到 Portal: {}", portal_rpc_url);
 
-    // Create an HTTP client
+    // ==================== 3. 创建 HTTP 客户端 ====================
     let client = reqwest::Client::new();
 
-    // Configure connection retry parameters
-    // The portal inside the sandbox may take some time to start, so we need to retry
-    const MAX_RETRIES: u32 = 300;
-    const TIMEOUT_MS: u64 = 50;
-    const RETRY_DELAY_MS: u64 = 10;
+    // ==================== 4. 配置重试参数 ====================
+    // Portal 启动需要时间，需要重试连接
+    const MAX_RETRIES: u32 = 300;  // 最大重试次数
+    const TIMEOUT_MS: u64 = 50;    // 每次请求超时（毫秒）
+    const RETRY_DELAY_MS: u64 = 10; // 重试间隔（毫秒）
 
-    // Try to establish a connection to the portal before sending the actual request
+    // ==================== 5. 重试连接 Portal ====================
     let mut retry_count = 0;
     let mut last_error = None;
 
-    // Keep trying to connect until we succeed or hit max retries
+    // 循环尝试连接，直到成功或达到最大重试次数
     while retry_count < MAX_RETRIES {
-        // Check if portal is available and ready using the health check endpoint
+        // 使用 HEAD 请求检查 Portal 健康状态
         match client
             .head(&portal_health_url)
             .timeout(Duration::from_millis(TIMEOUT_MS))
@@ -266,149 +469,215 @@ pub async fn forward_rpc_to_portal(
             Ok(response) => {
                 let status = response.status();
                 if status == reqwest::StatusCode::OK {
+                    // Portal 就绪
                     debug!(
-                        "Successfully connected to portal after {} retries (status: {})",
+                        "在 {} 次重试后成功连接到 Portal (状态：{})",
                         retry_count, status
                     );
                     break;
                 } else if status == reqwest::StatusCode::SERVICE_UNAVAILABLE {
-                    last_error = Some(format!("Portal not ready yet (status: {})", status));
-                    trace!(
-                        "Portal not ready (attempt {}), retrying...",
-                        retry_count + 1
-                    );
+                    // Portal 尚未就绪
+                    last_error = Some(format!("Portal 尚未就绪 (状态：{})", status));
+                    trace!("Portal 未就绪 (第 {} 次尝试)，重试中...", retry_count + 1);
                 } else {
-                    last_error = Some(format!("Portal returned error status: {}", status));
-                    trace!(
-                        "Portal connection attempt {} returned {}, retrying...",
-                        retry_count + 1,
-                        status
-                    );
+                    // 其他错误状态
+                    last_error = Some(format!("Portal 返回错误状态：{}", status));
+                    trace!("Portal 连接尝试 {} 返回 {}，重试中...", retry_count + 1, status);
                 }
             }
             Err(e) => {
-                // Track the error for potential reporting but keep retrying
+                // 连接失败，继续重试
                 last_error = Some(e.to_string());
-                trace!("Connection attempt {} failed, retrying...", retry_count + 1);
+                trace!("连接尝试 {} 失败，重试中...", retry_count + 1);
             }
         }
 
-        // Increment retry counter
+        // 增加重试计数
         retry_count += 1;
 
-        // Wait before the next retry to give the portal time to start
+        // 等待一段时间后再次尝试
         sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
     }
 
-    // If we've hit the max retries and still can't connect, report the error
+    // ==================== 6. 检查连接结果 ====================
     if retry_count >= MAX_RETRIES {
+        // 达到最大重试次数，返回错误
         let error_msg = if let Some(e) = last_error {
-            format!(
-                "Failed to connect to portal after {} retries: {}",
-                MAX_RETRIES, e
-            )
+            format!("在 {} 次重试后无法连接到 Portal: {}", MAX_RETRIES, e)
         } else {
-            format!("Failed to connect to portal after {} retries", MAX_RETRIES)
+            format!("在 {} 次重试后无法连接到 Portal", MAX_RETRIES)
         };
         return Err(ServerError::InternalError(error_msg));
     }
 
-    // Forward the request to the portal now that we've verified connectivity
+    // ==================== 7. 转发请求到 Portal ====================
     let response = client
         .post(&portal_rpc_url)
         .json(&request)
         .send()
         .await
         .map_err(|e| {
-            ServerError::InternalError(format!("Failed to forward RPC to portal: {}", e))
+            ServerError::InternalError(format!("转发 RPC 到 Portal 失败：{}", e))
         })?;
 
-    // Check if the request was successful
+    // ==================== 8. 检查响应状态 ====================
     if !response.status().is_success() {
         let status = response.status();
         let error_text = response
             .text()
             .await
-            .unwrap_or_else(|_| "Unknown error".to_string());
+            .unwrap_or_else(|_| "未知错误".to_string());
 
         return Err(ServerError::InternalError(format!(
-            "Portal returned error status {}: {}",
+            "Portal 返回错误状态 {}: {}",
             status, error_text
         )));
     }
 
-    // Parse the JSON-RPC response from the portal
+    // ==================== 9. 解析并返回 Portal 响应 ====================
     let portal_response: JsonRpcResponse = response.json().await.map_err(|e| {
-        ServerError::InternalError(format!("Failed to parse portal response: {}", e))
+        ServerError::InternalError(format!("解析 Portal 响应失败：{}", e))
     })?;
 
-    // Return the portal's response directly
+    // 直接返回 Portal 的响应
     Ok((StatusCode::OK, Json(portal_response)))
 }
 
-/// Implementation for starting a sandbox
+/// # 启动沙箱的实现函数
+///
+/// 此函数执行启动沙箱的完整流程，包括配置管理、端口分配和沙箱启动。
+///
+/// ## 启动流程
+///
+/// ```text
+/// 1. 验证沙箱名称
+///    │
+///    ▼
+/// 2. 检查/创建项目目录
+///    │
+///    ▼
+/// 3. 加载或创建配置文件 (microsandbox.yaml)
+///    │
+///    ├─ 有现有配置 → 读取并验证
+///    │
+///    └─ 无配置 → 创建默认配置
+///       │
+///       ▼
+/// 4. 更新沙箱配置（如果请求中提供了 config）
+///    │
+///    ▼
+/// 5. 分配端口（从 PortManager）
+///    │
+///    ▼
+/// 6. 更新配置中的端口映射
+///    │
+///    ▼
+/// 7. 保存配置文件
+///    │
+///    ▼
+/// 8. 启动沙箱（orchestra::up）
+///    │
+///    ▼
+/// 9. 轮询等待沙箱运行
+///    │
+///    ├─ 首次拉取镜像 → 超时 180 秒
+///    │
+///    └─ 常规启动 → 超时 60 秒
+///       │
+///       ▼
+/// 10. 返回结果
+/// ```
+///
+/// ## 配置管理
+///
+/// 沙箱配置保存在 `~/.microsandbox/projects/microsandbox.yaml`：
+///
+/// ```yaml
+/// sandboxes:
+///   my-python-sandbox:
+///     image: microsandbox/python
+///     memory: 512
+///     cpus: 1
+///     ports:
+///       - "54321:8080"  # 动态分配的 Portal 端口
+/// ```
+///
+/// ## 参数说明
+///
+/// | 参数 | 类型 | 说明 |
+/// |------|------|------|
+/// | `state` | `AppState` | 应用状态 |
+/// | `params` | `SandboxStartParams` | 启动参数 |
+///
+/// ## 返回值
+///
+/// - `Ok(String)`: 成功消息
+/// - `Err(ServerError)`: 启动失败
 pub async fn sandbox_start_impl(
     state: AppState,
     params: SandboxStartParams,
 ) -> ServerResult<String> {
-    // Validate sandbox name
+    // ==================== 1. 验证沙箱名称 ====================
     validate_sandbox_name(&params.sandbox)?;
 
+    // ==================== 2. 准备路径和配置 ====================
     let project_dir = state.get_config().get_project_dir().clone();
     let config_file = MICROSANDBOX_CONFIG_FILENAME;
     let config_path = project_dir.join(config_file);
     let sandbox = &params.sandbox;
 
-    // Create project directory if it doesn't exist
+    // ==================== 3. 创建项目目录 ====================
     if !project_dir.exists() {
         tokio_fs::create_dir_all(&project_dir).await.map_err(|e| {
-            ServerError::InternalError(format!("Failed to create project directory: {}", e))
+            ServerError::InternalError(format!("创建项目目录失败：{}", e))
         })?;
 
-        // Initialize microsandbox environment
+        // 初始化微沙箱环境
         menv::initialize(Some(project_dir.clone()))
             .await
             .map_err(|e| {
                 ServerError::InternalError(format!(
-                    "Failed to initialize microsandbox environment: {}",
+                    "初始化微沙箱环境失败：{}",
                     e
                 ))
             })?;
     }
 
-    // Check if we have a valid configuration to proceed with
+    // ==================== 4. 检查配置来源 ====================
+    // 检查请求中是否提供了配置（特别是 image 字段）
     let has_config_in_request = params
         .config
         .as_ref()
         .and_then(|c| c.image.as_ref())
         .is_some();
+    // 检查是否存在现有配置文件
     let has_existing_config_file = config_path.exists();
 
+    // 如果没有提供任何配置，返回错误
     if !has_config_in_request && !has_existing_config_file {
         return Err(ServerError::ValidationError(
             crate::error::ValidationError::InvalidInput(format!(
-                "No configuration provided and no existing configuration found for sandbox '{}'",
+                "未提供配置，且未找到沙箱 '{}' 的现有配置",
                 sandbox
             )),
         ));
     }
 
-    // Load or create the config
+    // ==================== 5. 加载或创建配置 ====================
     let mut config_yaml: serde_yaml::Value;
 
-    // Read or initialize the configuration
     if has_existing_config_file {
-        // Read the existing config
+        // 读取现有配置
         let config_content = tokio_fs::read_to_string(&config_path).await.map_err(|e| {
-            ServerError::InternalError(format!("Failed to read config file: {}", e))
+            ServerError::InternalError(format!("读取配置文件失败：{}", e))
         })?;
 
-        // Parse the config as YAML
+        // 解析 YAML
         config_yaml = serde_yaml::from_str(&config_content).map_err(|e| {
-            ServerError::InternalError(format!("Failed to parse config file: {}", e))
+            ServerError::InternalError(format!("解析配置文件失败：{}", e))
         })?;
 
-        // If we're relying on existing config, verify that the sandbox exists in it
+        // 如果依赖现有配置，验证沙箱是否存在于配置中
         if !has_config_in_request {
             let has_sandbox_config = config_yaml
                 .get("sandboxes")
@@ -418,36 +687,36 @@ pub async fn sandbox_start_impl(
             if !has_sandbox_config {
                 return Err(ServerError::ValidationError(
                     crate::error::ValidationError::InvalidInput(format!(
-                        "Sandbox '{}' not found in existing configuration",
+                        "在现有配置中未找到沙箱 '{}'",
                         sandbox
                     )),
                 ));
             }
         }
     } else {
-        // Create a new config with default values
+        // 创建新配置
         if !has_config_in_request {
             return Err(ServerError::ValidationError(
                 crate::error::ValidationError::InvalidInput(
-                    "No configuration provided and no existing configuration file".to_string(),
+                    "未提供配置，且不存在配置文件".to_string(),
                 ),
             ));
         }
 
-        // Create default config
+        // 写入默认配置
         tokio_fs::write(&config_path, DEFAULT_CONFIG)
             .await
             .map_err(|e| {
-                ServerError::InternalError(format!("Failed to create config file: {}", e))
+                ServerError::InternalError(format!("创建配置文件失败：{}", e))
             })?;
 
-        // Parse default config
+        // 解析默认配置
         config_yaml = serde_yaml::from_str(DEFAULT_CONFIG).map_err(|e| {
-            ServerError::InternalError(format!("Failed to parse default config: {}", e))
+            ServerError::InternalError(format!("解析默认配置失败：{}", e))
         })?;
     }
 
-    // Ensure sandboxes field exists
+    // ==================== 6. 确保 sandboxes 字段存在 ====================
     if !config_yaml.is_mapping() {
         config_yaml = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
     }
@@ -460,25 +729,25 @@ pub async fn sandbox_start_impl(
         );
     }
 
-    // Get the sandboxes mapping
+    // 获取 sandboxes 映射
     let sandboxes_key = serde_yaml::Value::String("sandboxes".to_string());
     let sandboxes_value = config_map.get_mut(&sandboxes_key).unwrap();
 
-    // Check if sandboxes value is a mapping, if not, replace it with an empty mapping
+    // 确保 sandboxes 值是映射类型
     if !sandboxes_value.is_mapping() {
         *sandboxes_value = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
     }
 
     let sandboxes_map = sandboxes_value.as_mapping_mut().unwrap();
 
-    // If config is provided and we have an image, update the sandbox configuration
+    // ==================== 7. 更新沙箱配置（如果提供了 config） ====================
     if let Some(config) = &params.config
         && config.image.is_some()
     {
-        // Create or update sandbox entry
+        // 创建或更新沙箱条目
         let mut sandbox_map = serde_yaml::Mapping::new();
 
-        // Set required image field
+        // 设置必需的 image 字段
         if let Some(image) = &config.image {
             sandbox_map.insert(
                 serde_yaml::Value::String("image".to_string()),
@@ -486,7 +755,7 @@ pub async fn sandbox_start_impl(
             );
         }
 
-        // Set optional fields
+        // 设置可选字段
         if let Some(memory) = config.memory {
             sandbox_map.insert(
                 serde_yaml::Value::String("memory".to_string()),
@@ -584,99 +853,101 @@ pub async fn sandbox_start_impl(
             );
         }
 
-        // Replace or add the sandbox in the config
+        // 替换或添加沙箱配置
         sandboxes_map.insert(
             serde_yaml::Value::String(sandbox.clone()),
             serde_yaml::Value::Mapping(sandbox_map),
         );
     }
 
-    // Assign a port for this sandbox
+    // ==================== 8. 分配端口 ====================
     let sandbox_key = params.sandbox.clone();
     let port = {
+        // 获取写锁，分配端口
         let mut port_manager = state.get_port_manager().write().await;
         port_manager.assign_port(&sandbox_key).await.map_err(|e| {
-            ServerError::InternalError(format!("Failed to assign portal port: {}", e))
+            ServerError::InternalError(format!("分配 Portal 端口失败：{}", e))
         })?
     };
 
-    debug!("Assigned portal port {} to sandbox {}", port, sandbox_key);
+    debug!("为沙箱 {} 分配 Portal 端口 {}", sandbox_key, port);
 
-    // Get the specific sandbox configuration
+    // ==================== 9. 更新端口映射 ====================
+    // 获取沙箱配置
     let sandbox_config = sandboxes_map
         .get_mut(serde_yaml::Value::String(sandbox.clone()))
         .ok_or_else(|| {
-            ServerError::InternalError(format!("Sandbox '{}' not found in configuration", sandbox))
+            ServerError::InternalError(format!("配置中未找到沙箱 '{}'", sandbox))
         })?
         .as_mapping_mut()
         .ok_or_else(|| {
             ServerError::InternalError(format!(
-                "Sandbox '{}' configuration is not a mapping",
+                "沙箱 '{}' 配置不是映射类型",
                 sandbox
             ))
         })?;
 
-    // Add or update the portal port mapping
-    let guest_port = DEFAULT_PORTAL_GUEST_PORT;
-    let portal_port_mapping = format!("{}:{}", port, guest_port);
+    // 添加或更新端口映射
+    let guest_port = DEFAULT_PORTAL_GUEST_PORT;  // Portal 在容器内的端口（通常 8080）
+    let portal_port_mapping = format!("{}:{}", port, guest_port);  // host_port:guest_port
 
     let ports_key = serde_yaml::Value::String("ports".to_string());
 
     if let Some(ports) = sandbox_config.get_mut(&ports_key) {
         if let Some(ports_seq) = ports.as_sequence_mut() {
-            // Filter out any existing portal port mappings
+            // 过滤掉现有的 Portal 端口映射
             ports_seq.retain(|p| {
                 p.as_str()
                     .map(|s| !s.ends_with(&format!(":{}", guest_port)))
                     .unwrap_or(true)
             });
 
-            // Add the new port mapping
+            // 添加新的端口映射
             ports_seq.push(serde_yaml::Value::String(portal_port_mapping));
         }
     } else {
-        // Create a new ports list with the portal port mapping
+        // 创建新的 ports 列表
         let ports_seq = vec![serde_yaml::Value::String(portal_port_mapping)];
         sandbox_config.insert(ports_key, serde_yaml::Value::Sequence(ports_seq));
     }
 
-    // Write the updated config back to the file
+    // ==================== 10. 保存配置 ====================
     let updated_config = serde_yaml::to_string(&config_yaml)
-        .map_err(|e| ServerError::InternalError(format!("Failed to serialize config: {}", e)))?;
+        .map_err(|e| ServerError::InternalError(format!("序列化配置失败：{}", e)))?;
 
     tokio_fs::write(&config_path, updated_config)
         .await
-        .map_err(|e| ServerError::InternalError(format!("Failed to write config file: {}", e)))?;
+        .map_err(|e| ServerError::InternalError(format!("写入配置文件失败：{}", e)))?;
 
-    // Start the sandbox
+    // ==================== 11. 启动沙箱 ====================
     orchestra::up(
         vec![sandbox.clone()],
         Some(&project_dir),
         Some(config_file),
-        true,
+        true,  // 等待沙箱启动
     )
     .await
     .map_err(|e| {
-        ServerError::InternalError(format!("Failed to start sandbox {}: {}", params.sandbox, e))
+        ServerError::InternalError(format!("启动沙箱 {} 失败：{}", params.sandbox, e))
     })?;
 
-    // Determine if this is a first-time image pull based on config
+    // ==================== 12. 确定超时时间 ====================
+    // 判断是否是首次拉取镜像（需要更长超时）
     let potentially_first_time_pull = if let Some(config) = &params.config {
         config.image.is_some()
     } else {
         false
     };
 
-    // Set appropriate timeout based on whether this might be a first-time image pull
-    // Using longer timeout for first-time pulls to allow for image downloading
+    // 设置超时时间
     let poll_timeout = if potentially_first_time_pull {
-        Duration::from_secs(180) // 3 minutes for first-time image pulls
+        Duration::from_secs(180)  // 首次拉取镜像：3 分钟
     } else {
-        Duration::from_secs(60) // 1 minute for regular starts
+        Duration::from_secs(60)   // 常规启动：1 分钟
     };
 
-    // Wait for the sandbox to actually start running with a timeout
-    debug!("Waiting for sandbox {} to start...", sandbox);
+    // ==================== 13. 轮询等待沙箱运行 ====================
+    debug!("等待沙箱 {} 启动...", sandbox);
     match timeout(
         poll_timeout,
         poll_sandbox_until_running(&params.sandbox, &project_dir, config_file),
@@ -685,150 +956,232 @@ pub async fn sandbox_start_impl(
     {
         Ok(result) => match result {
             Ok(_) => {
-                debug!("Sandbox {} is now running", sandbox);
-                Ok(format!("Sandbox {} started successfully", params.sandbox))
+                debug!("沙箱 {} 正在运行", sandbox);
+                Ok(format!("沙箱 {} 启动成功", params.sandbox))
             }
             Err(e) => {
-                // The sandbox was started but polling failed for some reason
-                warn!("Failed to verify sandbox {} is running: {}", sandbox, e);
+                // 沙箱已启动但轮询失败
+                warn!("无法验证沙箱 {} 是否运行：{}", sandbox, e);
                 Ok(format!(
-                    "Sandbox {} was started, but couldn't verify it's running: {}",
+                    "沙箱 {} 已启动，但无法验证运行状态：{}",
                     params.sandbox, e
                 ))
             }
         },
         Err(_) => {
-            // Timeout occurred, but we still return success since the sandbox might still be starting
-            warn!("Timeout waiting for sandbox {} to start", sandbox);
+            // 超时，但沙箱可能仍在启动中
+            warn!("等待沙箱 {} 启动超时", sandbox);
             Ok(format!(
-                "Sandbox {} was started, but timed out waiting for it to be fully running. It may still be initializing.",
+                "沙箱 {} 已启动，但等待运行状态超时。可能仍在初始化中。",
                 params.sandbox
             ))
         }
     }
 }
 
-/// Polls the sandbox until it's verified to be running
+/// # 轮询沙箱直到运行状态
+///
+/// 此函数定期检查沙箱状态，直到确认沙箱正在运行。
+///
+/// ## 轮询参数
+///
+/// - 轮询间隔：20ms
+/// - 最大尝试次数：2500 次（约 50 秒）
+///
+/// ## 参数说明
+///
+/// | 参数 | 类型 | 说明 |
+/// |------|------|------|
+/// | `sandbox_name` | `&str` | 沙箱名称 |
+/// | `project_dir` | `&StdPath` | 项目目录 |
+/// | `config_file` | `&str` | 配置文件名 |
+///
+/// ## 返回值
+///
+/// - `Ok(())`: 沙箱正在运行
+/// - `Err(ServerError)`: 超过最大尝试次数
 async fn poll_sandbox_until_running(
     sandbox_name: &str,
     project_dir: &StdPath,
     config_file: &str,
 ) -> ServerResult<()> {
     const POLL_INTERVAL: Duration = Duration::from_millis(20);
-    const MAX_ATTEMPTS: usize = 2500; // Increased to maintain similar overall timeout period with faster polling
+    const MAX_ATTEMPTS: usize = 2500;
 
     for attempt in 1..=MAX_ATTEMPTS {
-        // Check if the sandbox is running
+        // 检查沙箱状态
         let statuses = orchestra::status(
             vec![sandbox_name.to_string()],
             Some(project_dir),
             Some(config_file),
         )
         .await
-        .map_err(|e| ServerError::InternalError(format!("Failed to get sandbox status: {}", e)))?;
+        .map_err(|e| ServerError::InternalError(format!("获取沙箱状态失败：{}", e)))?;
 
-        // Find our sandbox in the results
+        // 查找目标沙箱
         if let Some(status) = statuses.iter().find(|s| s.name == sandbox_name)
             && status.running
         {
-            // Sandbox is running, we're done
+            // 沙箱正在运行
             debug!(
-                "Sandbox {} is running (verified on attempt {})",
+                "沙箱 {} 正在运行（第 {} 次尝试确认）",
                 sandbox_name, attempt
             );
             return Ok(());
         }
 
-        // Sleep before the next attempt
+        // 等待后再次尝试
         sleep(POLL_INTERVAL).await;
     }
 
-    // If we reach here, we've exceeded our attempt limit
+    // 超过最大尝试次数
     Err(ServerError::InternalError(format!(
-        "Exceeded maximum attempts to verify sandbox {} is running",
+        "验证沙箱 {} 运行状态超过最大尝试次数",
         sandbox_name
     )))
 }
 
-/// Implementation for stopping a sandbox
+/// # 停止沙箱的实现函数
+///
+/// 此函数执行停止沙箱的完整流程，包括沙箱停止和端口释放。
+///
+/// ## 停止流程
+///
+/// ```text
+/// 1. 验证沙箱名称
+///    │
+///    ▼
+/// 2. 检查项目目录是否存在
+///    │
+///    ▼
+/// 3. 检查配置文件是否存在
+///    │
+///    ▼
+/// 4. 停止沙箱（orchestra::down）
+///    │
+///    ▼
+/// 5. 释放端口（PortManager）
+///    │
+///    ▼
+/// 6. 返回成功消息
+/// ```
+///
+/// ## 参数说明
+///
+/// | 参数 | 类型 | 说明 |
+/// |------|------|------|
+/// | `state` | `AppState` | 应用状态 |
+/// | `params` | `SandboxStopParams` | 停止参数 |
+///
+/// ## 返回值
+///
+/// - `Ok(String)`: 成功消息
+/// - `Err(ServerError)`: 停止失败
 pub async fn sandbox_stop_impl(state: AppState, params: SandboxStopParams) -> ServerResult<String> {
-    // Validate sandbox name
+    // ==================== 1. 验证沙箱名称 ====================
     validate_sandbox_name(&params.sandbox)?;
 
+    // ==================== 2. 准备路径 ====================
     let project_dir = state.get_config().get_project_dir().clone();
     let config_file = MICROSANDBOX_CONFIG_FILENAME;
     let sandbox = &params.sandbox;
     let sandbox_key = params.sandbox.clone();
 
-    // Verify that the project directory exists
+    // ==================== 3. 检查项目目录 ====================
     if !project_dir.exists() {
         return Err(ServerError::ValidationError(
             crate::error::ValidationError::InvalidInput(
-                "Project directory does not exist".to_string(),
+                "项目目录不存在".to_string(),
             ),
         ));
     }
 
-    // Verify that the config file exists
+    // ==================== 4. 检查配置文件 ====================
     let config_path = project_dir.join(config_file);
     if !config_path.exists() {
         return Err(ServerError::ValidationError(
-            crate::error::ValidationError::InvalidInput("Configuration file not found".to_string()),
+            crate::error::ValidationError::InvalidInput("配置文件不存在".to_string()),
         ));
     }
 
-    // Stop the sandbox using orchestra::down
+    // ==================== 5. 停止沙箱 ====================
     orchestra::down(vec![sandbox.clone()], Some(&project_dir), Some(config_file))
         .await
         .map_err(|e| {
-            ServerError::InternalError(format!("Failed to stop sandbox {}: {}", params.sandbox, e))
+            ServerError::InternalError(format!("停止沙箱 {} 失败：{}", params.sandbox, e))
         })?;
 
-    // Release the assigned port
+    // ==================== 6. 释放端口 ====================
     {
         let mut port_manager = state.get_port_manager().write().await;
         port_manager.release_port(&sandbox_key).await.map_err(|e| {
-            ServerError::InternalError(format!("Failed to release portal port: {}", e))
+            ServerError::InternalError(format!("释放 Portal 端口失败：{}", e))
         })?;
     }
 
-    debug!("Released portal port for sandbox {}", sandbox_key);
+    debug!("已释放沙箱 {} 的 Portal 端口", sandbox_key);
 
-    // Return success message
-    Ok(format!("Sandbox {} stopped successfully", params.sandbox))
+    // ==================== 7. 返回成功消息 ====================
+    Ok(format!("沙箱 {} 停止成功", params.sandbox))
 }
 
-/// Implementation for sandbox metrics
+/// # 获取沙箱指标的实现函数
+///
+/// 此函数获取沙箱的运行状态和资源使用情况。
+///
+/// ## 指标类型
+///
+/// | 指标 | 类型 | 说明 |
+/// |------|------|------|
+/// | `running` | `bool` | 是否正在运行 |
+/// | `cpu_usage` | `Option<f32>` | CPU 使用率（百分比） |
+/// | `memory_usage` | `Option<u64>` | 内存使用量（字节） |
+/// | `disk_usage` | `Option<u64>` | 磁盘使用量（字节） |
+///
+/// ## 参数说明
+///
+/// | 参数 | 类型 | 说明 |
+/// |------|------|------|
+/// | `state` | `AppState` | 应用状态 |
+/// | `params` | `SandboxMetricsGetParams` | 指标查询参数 |
+///
+/// ## 返回值
+///
+/// - `Ok(SandboxStatusResponse)`: 沙箱状态列表
+/// - `Err(ServerError)`: 获取失败
 pub async fn sandbox_get_metrics_impl(
     state: AppState,
     params: SandboxMetricsGetParams,
 ) -> ServerResult<SandboxStatusResponse> {
-    // Validate sandbox name if provided
+    // ==================== 1. 验证沙箱名称（如果提供） ====================
     if let Some(sandbox) = &params.sandbox {
         validate_sandbox_name(sandbox)?;
     }
 
+    // ==================== 2. 获取项目目录 ====================
     let project_dir = state.get_config().get_project_dir().clone();
 
-    // Check if the project directory exists
+    // 检查项目目录是否存在
     if !project_dir.exists() {
         return Err(ServerError::InternalError(format!(
-            "Project directory '{}' does not exist",
+            "项目目录 '{}' 不存在",
             project_dir.display()
         )));
     }
 
-    // Get metrics filtered by sandbox name if provided
+    // ==================== 3. 确定要查询的沙箱列表 ====================
     let sandbox_names = if let Some(sandbox) = &params.sandbox {
-        vec![sandbox.clone()]
+        vec![sandbox.clone()]  // 只查询指定沙箱
     } else {
-        vec![]
+        vec![]  // 查询所有沙箱
     };
 
+    // ==================== 4. 获取沙箱状态 ====================
     let mut all_statuses = Vec::new();
 
     match orchestra::status(sandbox_names, Some(&project_dir), None).await {
         Ok(statuses) => {
+            // 转换状态格式
             for status in statuses {
                 all_statuses.push(SandboxStatus {
                     name: status.name,
@@ -841,7 +1194,7 @@ pub async fn sandbox_get_metrics_impl(
         }
         Err(e) => {
             return Err(ServerError::InternalError(format!(
-                "Error getting metrics: {e}"
+                "获取指标时出错：{e}"
             )));
         }
     }
@@ -852,29 +1205,34 @@ pub async fn sandbox_get_metrics_impl(
 }
 
 //--------------------------------------------------------------------------------------------------
-// Functions: Proxy Handlers
+// 函数定义：代理处理器
 //--------------------------------------------------------------------------------------------------
 
-/// Handler for proxy requests
+/// # 代理请求处理器
+///
+/// 当前是演示实现，返回请求信息而不是实际转发。
+///
+/// ## 参数说明
+///
+/// | 参数 | 类型 | 说明 |
+/// |------|------|------|
+/// | `_state` | `State<AppState>` | 应用状态（未使用） |
+/// | `(sandbox, path)` | `Path<(String, PathBuf)>` | 沙箱名称和路径 |
+/// | `req` | `Request<Body>` | HTTP 请求 |
 pub async fn proxy_request(
     State(_state): State<AppState>,
     Path((sandbox, path)): Path<(String, PathBuf)>,
     req: Request<Body>,
 ) -> ServerResult<impl IntoResponse> {
-    // In a real implementation, this would use the middleware::proxy_uri function
-    // to determine the target URI and then forward the request
-
     let path_str = path.display().to_string();
 
-    // Calculate target URI using our middleware function
+    // 计算目标 URI（演示用）
     let original_uri = req.uri().clone();
     let _target_uri = middleware::proxy_uri(original_uri, &sandbox);
 
-    // In a production system, this handler would forward the request to the target URI
-    // For now, we'll just return information about what would be proxied
-
+    // 构建响应信息
     let response = format!(
-        "Axum Proxy Request\n\nSandbox: {}\nPath: {}\nMethod: {}\nHeaders: {:?}",
+        "Axum 代理请求\n\n沙箱：{}\n路径：{}\n方法：{}\n请求头：{:?}",
         sandbox,
         path_str,
         req.method(),
@@ -890,33 +1248,53 @@ pub async fn proxy_request(
     Ok(result)
 }
 
-/// Fallback handler for proxy requests
+/// # 代理回退处理器
+///
+/// 当代理请求没有匹配到任何路由时返回 404。
 pub async fn proxy_fallback() -> ServerResult<impl IntoResponse> {
-    Ok((StatusCode::NOT_FOUND, "Resource not found"))
+    Ok((StatusCode::NOT_FOUND, "资源不存在"))
 }
 
 //--------------------------------------------------------------------------------------------------
-// Functions: Helpers
+// 辅助函数
 //--------------------------------------------------------------------------------------------------
 
-/// Validates a sandbox name
+/// # 验证沙箱名称
+///
+/// 沙箱名称必须符合以下规则：
+/// 1. 不能为空
+/// 2. 长度不超过 63 字符
+/// 3. 只能包含字母、数字、连字符（-）和下划线（_）
+/// 4. 必须以字母或数字开头
+///
+/// ## 参数说明
+///
+/// | 参数 | 类型 | 说明 |
+/// |------|------|------|
+/// | `name` | `&str` | 待验证的沙箱名称 |
+///
+/// ## 返回值
+///
+/// - `Ok(())`: 名称有效
+/// - `Err(ServerError::ValidationError)`: 名称无效
 fn validate_sandbox_name(name: &str) -> ServerResult<()> {
-    // Check name length
+    // 检查是否为空
     if name.is_empty() {
         return Err(ServerError::ValidationError(
-            crate::error::ValidationError::InvalidInput("Sandbox name cannot be empty".to_string()),
+            crate::error::ValidationError::InvalidInput("沙箱名称不能为空".to_string()),
         ));
     }
 
+    // 检查长度
     if name.len() > 63 {
         return Err(ServerError::ValidationError(
             crate::error::ValidationError::InvalidInput(
-                "Sandbox name cannot exceed 63 characters".to_string(),
+                "沙箱名称不能超过 63 个字符".to_string(),
             ),
         ));
     }
 
-    // Check name characters
+    // 检查字符合法性
     let valid_chars = name
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
@@ -924,17 +1302,16 @@ fn validate_sandbox_name(name: &str) -> ServerResult<()> {
     if !valid_chars {
         return Err(ServerError::ValidationError(
             crate::error::ValidationError::InvalidInput(
-                "Sandbox name can only contain alphanumeric characters, hyphens, or underscores"
-                    .to_string(),
+                "沙箱名称只能包含字母、数字、连字符或下划线".to_string(),
             ),
         ));
     }
 
-    // Must start with an alphanumeric character
+    // 检查首字符
     if !name.chars().next().unwrap().is_ascii_alphanumeric() {
         return Err(ServerError::ValidationError(
             crate::error::ValidationError::InvalidInput(
-                "Sandbox name must start with an alphanumeric character".to_string(),
+                "沙箱名称必须以字母或数字开头".to_string(),
             ),
         ));
     }

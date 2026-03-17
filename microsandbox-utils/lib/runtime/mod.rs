@@ -1,11 +1,103 @@
-//! `microsandbox_utils::runtime` is a module containing runtime utilities for the microsandbox project.
+//! # 运行时（runtime）模块
+//!
+//! 本模块包含 microsandbox 项目的运行时工具，主要用于进程管理和监控。
+//!
+//! ## 子模块
+//!
+//! ### monitor
+//! [`monitor`](self/monitor/) 子模块定义了进程监控的 trait：
+//! - `ProcessMonitor`: 监控进程生命周期的 trait
+//! - `ChildIo`: 子进程 IO 类型的枚举（TTY 或管道）
+//!
+//! ### supervisor
+//! [`supervisor`](self/supervisor/) 子模块提供了进程监督者实现：
+//! - `Supervisor`: 管理子进程和日志的监督者结构体
+//!
+//! ## 什么是进程监督者（Supervisor）？
+//!
+//! 监督者模式是一种容错设计模式：
+//! 1. **监督者**负责启动和管理**子进程**
+//! 2. 监督者监控子进程的生命周期
+//! 3. 当子进程异常退出时，监督者可以采取恢复措施
+//! 4. 监督者还负责管理子进程的日志和 IO
+//!
+//! ## 架构概述
+//!
+//! ```text
+//! ┌─────────────────────────────────────────────────────────┐
+//! │                      Supervisor                         │
+//! │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────┐  │
+//! │  │  child_exe  │  │ child_args  │  │ process_monitor │  │
+//! │  │  (PathBuf)  │  │  (Vec)      │  │     (Monitor)   │  │
+//! │  └─────────────┘  └─────────────┘  └─────────────────┘  │
+//! │                            │                            │
+//! │                            ▼                            │
+//! │                   ┌───────────────┐                     │
+//! │                   │  Child Process│                     │
+//! │                   │   (msbrun)    │                     │
+//! │                   └───────────────┘                     │
+//! │                            │                            │
+//! │              ┌─────────────┼─────────────┐              │
+//! │              ▼             ▼             ▼              │
+//! │         ┌────────┐   ┌────────┐   ┌────────┐           │
+//! │         │ stdin  │   │ stdout │   │ stderr │           │
+//! │         └────────┘   └────────┘   └────────┘           │
+//! └─────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! ## 使用示例
+//!
+//! ```rust,no_run
+//! use microsandbox_utils::runtime::{Supervisor, ProcessMonitor};
+//!
+//! // 假设有一个实现了 ProcessMonitor 的类型
+//! struct MyMonitor;
+//!
+//! #[tokio::main]
+//! async fn main() -> microsandbox_utils::MicosandboxUtilsResult<()> {
+//!     // 创建监督者
+//!     let mut supervisor = Supervisor::new(
+//!         "/path/to/child",           // 子进程可执行文件
+//!         vec!["arg1", "arg2"],       // 参数
+//!         vec![("KEY", "value")],     // 环境变量
+//!         "/path/to/logs",            // 日志目录
+//!         MyMonitor,                  // 进程监控器
+//!     );
+//!
+//!     // 启动监督者和子进程
+//!     supervisor.start().await?;
+//!
+//!     Ok(())
+//! }
+//! ```
+//!
+//! ## TTY 与管道模式
+//!
+//! 监督者支持两种子进程 IO 模式：
+//!
+//! ### TTY 模式（交互式）
+//! - 创建伪终端（PTY）
+//! - 适用于需要交互的 shell 会话
+//! - 支持终端特性（如颜色、光标控制）
+//!
+//! ### 管道模式（非交互式）
+//! - 使用标准管道连接 stdin/stdout/stderr
+//! - 适用于后台服务
+//! - 更容易捕获和重定向输出
+//!
+//! ## 模块导出
+//!
+//! 本模块将子模块的所有公共内容导出到父模块，
+//! 使得使用者可以直接通过 `microsandbox_utils::runtime::XXX` 访问。
 
-mod monitor;
-mod supervisor;
+mod monitor;    // 进程监控 trait 定义
+mod supervisor; // 进程监督者实现
 
 //--------------------------------------------------------------------------------------------------
-// Exports
+// 模块导出
 //--------------------------------------------------------------------------------------------------
 
+// 导出 monitor 和 supervisor 模块的所有公共类型和函数
+// 这样使用者可以直接通过 microsandbox_utils::runtime::XXX 访问
 pub use monitor::*;
 pub use supervisor::*;

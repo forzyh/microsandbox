@@ -1,245 +1,302 @@
-//! Request and response payload definitions for the microsandbox server.
+//! # 数据结构模块 - 请求和响应载荷定义
 //!
-//! This module defines the data structures for:
-//! - API request payloads for sandbox operations
-//! - API response payloads for operation results
-//! - Error response structures and types
-//! - Status message formatting
+//! 本模块定义了微沙箱服务器 API 使用的所有数据结构和载荷类型。
 //!
-//! The module implements:
-//! - Request/response serialization and deserialization
-//! - Structured error responses with type categorization
-//! - Success message formatting for sandbox operations
-//! - Detailed error information handling
+//! ## 模块结构
+//!
+//! ```text
+//! payload.rs
+//! ├── JSON-RPC 基础结构
+//! │   ├── JsonRpcRequest - JSON-RPC 请求
+//! │   ├── JsonRpcResponse - JSON-RPC 响应
+//! │   ├── JsonRpcNotification - JSON-RPC 通知 (无需响应)
+//! │   ├── JsonRpcError - JSON-RPC 错误
+//! │   └── JsonRpcResponseOrNotification - 响应或通知的枚举
+//! │
+//! ├── 沙箱操作参数
+//! │   ├── SandboxStartParams - 启动沙箱参数
+//! │   ├── SandboxStopParams - 停止沙箱参数
+//! │   └── SandboxMetricsGetParams - 获取指标参数
+//! │
+//! ├── 沙箱配置
+//! │   └── SandboxConfig - 沙箱配置结构
+//! │
+//! ├── Portal RPC 参数
+//! │   ├── SandboxReplRunParams - REPL 代码执行参数
+//! │   ├── SandboxReplGetOutputParams - 获取 REPL 输出参数
+//! │   ├── SandboxCommandRunParams - 命令执行参数
+//! │   └── SandboxCommandGetOutputParams - 获取命令输出参数
+//! │
+//! └── 响应结构
+//!     ├── RegularMessageResponse - 普通消息响应
+//!     ├── SystemStatusResponse - 系统状态响应
+//!     ├── SandboxStatusResponse - 沙箱状态响应
+//!     ├── SandboxConfigResponse - 沙箱配置响应
+//!     └── SandboxStatus - 单个沙箱状态
+//! ```
+//!
+//! ## JSON-RPC 协议说明
+//!
+//! 本服务器遵循 [JSON-RPC 2.0](https://www.jsonrpc.org/specification) 规范。
 
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
 //--------------------------------------------------------------------------------------------------
-// Constants
+// 常量定义
 //--------------------------------------------------------------------------------------------------
 
-/// JSON-RPC version - always "2.0"
+/// JSON-RPC 协议版本
+///
+/// 根据 JSON-RPC 2.0 规范，此字段必须精确为 "2.0"。
 pub const JSONRPC_VERSION: &str = "2.0";
 
 //--------------------------------------------------------------------------------------------------
-// Types: JSON-RPC Payloads
+// 类型定义：JSON-RPC 载荷
 //--------------------------------------------------------------------------------------------------
 
-/// JSON-RPC request structure
+/// # JSON-RPC 请求结构
+///
+/// 遵循 JSON-RPC 2.0 规范的请求格式。
 #[derive(Debug, Deserialize, Serialize)]
 pub struct JsonRpcRequest {
-    /// JSON-RPC version, must be "2.0"
+    /// JSON-RPC 版本号，必须为 "2.0"
     pub jsonrpc: String,
 
-    /// Method name
+    /// 方法名称
     pub method: String,
 
-    /// Optional parameters for the method
+    /// 方法参数
+    ///
+    /// 使用 `#[serde(default)]` 属性，如果请求中缺少此字段，
+    /// 则使用默认值（对于 Value 是 Null）。
     #[serde(default)]
     pub params: Value,
 
-    /// Request ID (optional for notifications)
+    /// 请求 ID
+    ///
+    /// - 如果存在：这是一个常规请求，需要返回响应
+    /// - 如果不存在：这是一个通知，不需要响应
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<Value>,
 }
 
-/// JSON-RPC notification structure (no id field, no response expected)
+/// # JSON-RPC 通知结构
+///
+/// 通知是一种特殊的 JSON-RPC 请求，它不需要服务器返回响应。
+/// 通知没有 `id` 字段，这是区分通知和常规请求的唯一方式。
 #[derive(Debug, Deserialize, Serialize)]
 pub struct JsonRpcNotification {
-    /// JSON-RPC version, must be "2.0"
+    /// JSON-RPC 版本号，必须为 "2.0"
     pub jsonrpc: String,
 
-    /// Method name
+    /// 方法名称
     pub method: String,
 
-    /// Optional parameters for the method
+    /// 方法参数
     #[serde(default)]
     pub params: Value,
 }
 
-/// JSON-RPC response structure
+/// # JSON-RPC 响应结构
+///
+/// 遵循 JSON-RPC 2.0 规范的响应格式。
 #[derive(Debug, Deserialize, Serialize)]
 pub struct JsonRpcResponse {
-    /// JSON-RPC version, always "2.0"
+    /// JSON-RPC 版本号，固定为 "2.0"
     pub jsonrpc: String,
 
-    /// Result of the method execution (if successful)
+    /// 方法执行结果（如果成功）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<Value>,
 
-    /// Error details (if failed)
+    /// 错误详情（如果失败）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<JsonRpcError>,
 
-    /// Response ID (same as request ID, optional for notifications)
+    /// 响应 ID，与请求 ID 相同
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<Value>,
 }
 
-/// JSON-RPC error structure
+/// # JSON-RPC 错误结构
+///
+/// 遵循 JSON-RPC 2.0 规范的错误格式。
 #[derive(Debug, Deserialize, Serialize)]
 pub struct JsonRpcError {
-    /// Error code
+    /// 错误码
+    ///
+    /// 标准错误码：
+    /// - -32700: 解析错误
+    /// - -32600: 无效请求
+    /// - -32601: 方法不存在
+    /// - -32602: 无效参数
+    /// - -32603: 内部错误
     pub code: i32,
 
-    /// Error message
+    /// 错误消息
     pub message: String,
 
-    /// Optional error data
+    /// 可选的错误数据
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<Value>,
 }
 
-/// JSON-RPC response or notification result
-/// This enum allows handlers to return either a response (for regular requests)
-/// or no response (for notifications) while maintaining type safety
+/// # JSON-RPC 响应或通知枚举
+///
+/// 此枚举允许处理器返回两种结果：
+/// - 常规响应（对于有 id 的请求）
+/// - 通知处理结果（对于无 id 的通知）
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
 pub enum JsonRpcResponseOrNotification {
-    /// A regular JSON-RPC response
+    /// 常规 JSON-RPC 响应
     Response(JsonRpcResponse),
 
-    /// A processed notification (no response should be sent)
+    /// 已处理的通知（无需响应）
     Notification(ProcessedNotification),
 }
 
-/// Represents a processed JSON-RPC notification (no response expected)
+/// # 已处理的通知标记
+///
+/// 此结构表示一个 JSON-RPC 通知已被处理，不需要返回响应。
 #[derive(Debug, Serialize)]
 pub struct ProcessedNotification {
-    /// Indicates this was a notification that was processed
+    /// 表示此通知已被处理
     #[serde(skip)]
     pub processed: bool,
 }
 
 //--------------------------------------------------------------------------------------------------
-// Types: Server Operations
+// 类型定义：服务器操作
 //--------------------------------------------------------------------------------------------------
 
-/// Request payload for starting a sandbox
+/// # 启动沙箱请求参数
 #[derive(Debug, Deserialize)]
 pub struct SandboxStartParams {
-    /// Sandbox name
+    /// 沙箱名称
     pub sandbox: String,
 
-    /// Optional sandbox configuration
+    /// 可选的沙箱配置
     pub config: Option<SandboxConfig>,
 }
 
-/// Request payload for stopping a sandbox
+/// # 停止沙箱请求参数
 #[derive(Debug, Deserialize)]
 pub struct SandboxStopParams {
-    /// Sandbox name
+    /// 沙箱名称
     pub sandbox: String,
 }
 
-/// Request payload for getting sandbox metrics
+/// # 获取沙箱指标请求参数
 #[derive(Debug, Deserialize)]
 pub struct SandboxMetricsGetParams {
-    /// Optional sandbox name - if not provided, all sandboxes will be included
+    /// 可选的沙箱名称
+    ///
+    /// - 如果提供：只返回指定沙箱的指标
+    /// - 如果省略或为 null：返回所有沙箱的指标
     pub sandbox: Option<String>,
 }
 
-/// Configuration for a sandbox
-/// Similar to microsandbox-core's Sandbox but with optional fields for update operations
+/// # 沙箱配置结构
+///
+/// 定义沙箱的运行参数，与 `microsandbox-core` 中的 Sandbox 结构类似，
+/// 但所有字段都是可选的，便于更新操作。
 #[derive(Debug, Deserialize)]
 pub struct SandboxConfig {
-    /// The image to use (optional for updates)
+    /// Docker 镜像名称
     pub image: Option<String>,
 
-    /// The amount of memory in MiB to use
+    /// 内存限制（MiB）
     pub memory: Option<u32>,
 
-    /// The number of vCPUs to use
+    /// CPU 核心数
     pub cpus: Option<u8>,
 
-    /// The volumes to mount
+    /// 卷挂载列表
     #[serde(default, deserialize_with = "deserialize_null_as_default")]
     pub volumes: Vec<String>,
 
-    /// The ports to expose
+    /// 端口映射列表
     #[serde(default, deserialize_with = "deserialize_null_as_default")]
     pub ports: Vec<String>,
 
-    /// The environment variables to use
+    /// 环境变量列表
     #[serde(default, deserialize_with = "deserialize_null_as_default")]
     pub envs: Vec<String>,
 
-    /// The sandboxes to depend on
+    /// 依赖的沙箱名称列表
     #[serde(default, deserialize_with = "deserialize_null_as_default")]
     pub depends_on: Vec<String>,
 
-    /// The working directory to use
+    /// 工作目录
     pub workdir: Option<String>,
 
-    /// The shell to use (optional for updates)
+    /// Shell 程序路径
     pub shell: Option<String>,
 
-    /// The scripts that can be run
+    /// 预定义脚本
     #[serde(default, deserialize_with = "deserialize_null_as_default")]
     pub scripts: std::collections::HashMap<String, String>,
 
-    /// The exec command to run
+    /// 启动命令
     pub exec: Option<String>,
-    // SECURITY: Needs networking namespacing to be implemented
-    // /// The network scope for the sandbox
-    // pub scope: Option<String>,
 }
 
 //--------------------------------------------------------------------------------------------------
-// Types: Portal-mirrored RPC Payloads
+// 类型定义：Portal 镜像 RPC 载荷
 //--------------------------------------------------------------------------------------------------
 
-/// Request parameters for executing code in a REPL environment
+/// # REPL 代码执行参数
 #[derive(Debug, Deserialize, Serialize)]
 pub struct SandboxReplRunParams {
-    /// Sandbox name
+    /// 沙箱名称
     pub sandbox: String,
 
-    /// Code to be executed
+    /// 要执行的代码
     pub code: String,
 
-    /// Programming language to use for execution
+    /// 编程语言
     pub language: String,
 }
 
-/// Request parameters for retrieving output from a previous REPL execution
+/// # 获取 REPL 输出参数
 #[derive(Debug, Deserialize, Serialize)]
 pub struct SandboxReplGetOutputParams {
-    /// Unique identifier for the execution
+    /// 执行 ID
     pub execution_id: String,
 }
 
-/// Request parameters for executing a shell command
+/// # 命令执行参数
 #[derive(Debug, Deserialize, Serialize)]
 pub struct SandboxCommandRunParams {
-    /// Sandbox name
+    /// 沙箱名称
     pub sandbox: String,
 
-    /// Command to execute
+    /// 要执行的命令
     pub command: String,
 
-    /// Optional arguments for the command
+    /// 命令参数
     #[serde(default)]
     pub args: Vec<String>,
 
-    /// Optional timeout in seconds
+    /// 超时时间（秒）
     pub timeout: Option<i32>,
 }
 
-/// Request parameters for retrieving output from a previous command execution
+/// # 获取命令输出参数
 #[derive(Debug, Deserialize, Serialize)]
 pub struct SandboxCommandGetOutputParams {
-    /// Unique identifier for the command execution
+    /// 执行 ID
     pub execution_id: String,
 }
 
 //--------------------------------------------------------------------------------------------------
-// Methods
+// 方法实现
 //--------------------------------------------------------------------------------------------------
 
 impl JsonRpcRequest {
-    /// Create a new JSON-RPC request
+    /// 创建新的 JSON-RPC 请求
     pub fn new(method: String, params: Value, id: Value) -> Self {
         Self {
             jsonrpc: JSONRPC_VERSION.to_string(),
@@ -249,7 +306,7 @@ impl JsonRpcRequest {
         }
     }
 
-    /// Create a new JSON-RPC notification (no response expected)
+    /// 创建新的 JSON-RPC 通知
     pub fn new_notification(method: String, params: Value) -> Self {
         Self {
             jsonrpc: JSONRPC_VERSION.to_string(),
@@ -259,48 +316,48 @@ impl JsonRpcRequest {
         }
     }
 
-    /// Check if this is a notification (no id field)
+    /// 检查是否为通知
     pub fn is_notification(&self) -> bool {
         self.id.is_none()
     }
 }
 
 impl ProcessedNotification {
-    /// Create a new processed notification marker
+    /// 创建已处理的通知标记
     pub fn processed() -> Self {
         Self { processed: true }
     }
 }
 
 impl JsonRpcResponseOrNotification {
-    /// Create a successful response
+    /// 创建成功响应
     pub fn success(result: Value, id: Option<Value>) -> Self {
         Self::Response(JsonRpcResponse::success(result, id))
     }
 
-    /// Create an error response
+    /// 创建错误响应
     pub fn error(error: JsonRpcError, id: Option<Value>) -> Self {
         Self::Response(JsonRpcResponse::error(error, id))
     }
 
-    /// Create a response from a JsonRpcResponse
+    /// 从 JsonRpcResponse 创建响应
     pub fn response(response: JsonRpcResponse) -> Self {
         Self::Response(response)
     }
 
-    /// Create a notification result (no response)
+    /// 创建通知结果
     pub fn notification(notification: ProcessedNotification) -> Self {
         Self::Notification(notification)
     }
 
-    /// Create a no-response result for notifications (deprecated - use notification() instead)
+    /// 创建无响应结果（已废弃）
     pub fn no_response() -> Self {
         Self::Notification(ProcessedNotification::processed())
     }
 }
 
 impl JsonRpcResponse {
-    /// Create a new successful JSON-RPC response
+    /// 创建成功的 JSON-RPC 响应
     pub fn success(result: Value, id: Option<Value>) -> Self {
         Self {
             jsonrpc: JSONRPC_VERSION.to_string(),
@@ -310,7 +367,7 @@ impl JsonRpcResponse {
         }
     }
 
-    /// Create a new error JSON-RPC response
+    /// 创建错误的 JSON-RPC 响应
     pub fn error(error: JsonRpcError, id: Option<Value>) -> Self {
         Self {
             jsonrpc: JSONRPC_VERSION.to_string(),
@@ -322,63 +379,64 @@ impl JsonRpcResponse {
 }
 
 //--------------------------------------------------------------------------------------------------
-// Types: Responses
+// 类型定义：响应
 //--------------------------------------------------------------------------------------------------
 
-/// Response type for regular message responses
+/// # 普通消息响应
 #[derive(Debug, Serialize)]
 pub struct RegularMessageResponse {
-    /// Message indicating the status of the sandbox operation
+    /// 沙箱操作的状态消息
     pub message: String,
 }
 
-/// System status response
+/// # 系统状态响应
 #[derive(Debug, Serialize)]
 pub struct SystemStatusResponse {}
 
-/// Sandbox status response
+/// # 沙箱状态响应
 #[derive(Debug, Serialize)]
 pub struct SandboxStatusResponse {
-    /// List of sandbox statuses
+    /// 沙箱状态列表
     pub sandboxes: Vec<SandboxStatus>,
 }
 
-/// Sandbox configuration response
+/// # 沙箱配置响应
 #[derive(Debug, Serialize)]
 pub struct SandboxConfigResponse {}
 
-/// Status of an individual sandbox
+/// # 单个沙箱的状态
 #[derive(Debug, Serialize)]
 pub struct SandboxStatus {
-    /// The name of the sandbox
+    /// 沙箱名称
     pub name: String,
 
-    /// Whether the sandbox is running
+    /// 是否正在运行
     pub running: bool,
 
-    /// CPU usage percentage
+    /// CPU 使用率（百分比）
     pub cpu_usage: Option<f32>,
 
-    /// Memory usage in MiB
+    /// 内存使用量（字节）
     pub memory_usage: Option<u64>,
 
-    /// Disk usage of the RW layer in bytes
+    /// 磁盘使用量（字节）
     pub disk_usage: Option<u64>,
 }
 
 //--------------------------------------------------------------------------------------------------
-// Trait Implementations
+// Trait 实现
 //--------------------------------------------------------------------------------------------------
 
+/// 将响应转换为 Axum HTTP 响应
 impl axum::response::IntoResponse for JsonRpcResponseOrNotification {
     fn into_response(self) -> axum::response::Response {
         match self {
+            // 常规响应：返回 JSON
             JsonRpcResponseOrNotification::Response(response) => {
                 (axum::http::StatusCode::OK, axum::Json(response)).into_response()
             }
+            // 通知：返回空响应（JSON-RPC 规范：通知不需要响应）
             JsonRpcResponseOrNotification::Notification(_notification) => {
-                // For JSON-RPC notifications, send HTTP 200 with empty body
-                // This satisfies the HTTP protocol requirement while sending no JSON-RPC response
                 axum::http::StatusCode::OK.into_response()
             }
         }
@@ -386,15 +444,30 @@ impl axum::response::IntoResponse for JsonRpcResponseOrNotification {
 }
 
 //--------------------------------------------------------------------------------------------------
-// Functions: Helpers
+// 辅助函数
 //--------------------------------------------------------------------------------------------------
 
-/// Deserializes a value that may be `null` into the type's default value.
-/// This is useful for fields where clients may send `null` instead of omitting the field.
+/// # 反序列化 null 为默认值
+///
+/// 此函数用于处理 JSON 中显式为 `null` 的字段，将其转换为目标类型的默认值。
+///
+/// ## 使用示例
+///
+/// ```rust,ignore
+/// #[derive(Deserialize)]
+/// struct Config {
+///     // 如果客户端发送 "volumes": null，会转换为 Vec::new()
+///     #[serde(default, deserialize_with = "deserialize_null_as_default")]
+///     volumes: Vec<String>,
+/// }
+/// ```
 fn deserialize_null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
     D: Deserializer<'de>,
     T: Default + Deserialize<'de>,
 {
+    // 尝试反序列化为 Option<T>
+    // 如果是 null，返回 None；如果是值，返回 Some(value)
+    // 然后使用 unwrap_or_default() 将 None 转换为 T::default()
     Ok(Option::deserialize(deserializer)?.unwrap_or_default())
 }

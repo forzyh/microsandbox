@@ -1,3 +1,23 @@
+//! # msb 主命令参数定义
+//!
+//! 本文件定义了 `msb`（microsandbox）主命令的所有命令行参数。
+//! `msb` 是用户主要交互的命令行工具，提供沙箱管理、镜像操作、服务器控制等功能。
+//!
+//! ## 命令结构
+//!
+//! ```text
+//! msb <SUBCOMMAND> [OPTIONS] [ARGUMENTS]
+//!
+//! 主要子命令：
+//! - init: 初始化新项目
+//! - add/remove: 添加/删除沙箱
+//! - run/shell: 运行沙箱/打开 shell
+//! - up/down: 启动/停止所有沙箱
+//! - install/uninstall: 安装/卸载全局脚本
+//! - server: 管理沙箱服务器
+//! - clean: 清理缓存
+//! ```
+
 use std::{error::Error, path::PathBuf};
 
 use crate::styles;
@@ -6,663 +26,1111 @@ use microsandbox_core::oci::Reference;
 use typed_path::Utf8UnixPathBuf;
 
 //-------------------------------------------------------------------------------------------------
-// Types
+// Types - 类型定义
 //-------------------------------------------------------------------------------------------------
 
-/// msb (microsandbox) is a tool for managing lightweight sandboxes and images
+/// ## MicrosandboxArgs 结构体
+///
+/// `msb` 命令的顶层参数结构体，包含全局选项和子命令。
+///
+/// ### 全局选项（`global = true`）
+/// 这些选项可以出现在命令的任何位置：
+/// - `msb --version run myapp`
+/// - `msb run --version myapp`
+/// - `msb run myapp --version`
+///
+/// ### 派生属性说明
+///
+/// **`#[command(name = "msb", ...)]`**
+/// - 设置命令名称为 "msb"
+/// - `author`: 从 Cargo.toml 自动获取作者信息
+/// - `styles=styles::styles()`: 使用自定义 ANSI 样式
 #[derive(Debug, Parser)]
 #[command(name = "msb", author, styles=styles::styles())]
 pub struct MicrosandboxArgs {
-    /// The subcommand to run
+    /// ### 子命令
+    ///
+    /// 可选的子命令，如 `init`, `run`, `add` 等。
+    /// 使用 `Option` 类型表示子命令可选（不指定时显示帮助）。
     #[command(subcommand)]
-    pub subcommand: Option<MicrosandboxSubcommand>,
+    pub subcommand: Option<MicosandboxSubcommand>,
 
-    /// Show version
+    /// ### 显示版本
+    ///
+    /// 显示 microsandbox 的版本号。
+    ///
+    /// ### `global = true` 说明
+    /// 此参数是全局的，可以在命令的任何位置使用。
     #[arg(short = 'V', long, global = true)]
     pub version: bool,
 
-    /// Show logs with error level
+    /// ### 日志级别选项
+    ///
+    /// 以下五个参数控制日志输出的详细程度。
+    /// 它们是互斥的（虽然这里没有显式检查），通常只使用一个。
+    ///
+    /// ### 日志级别层次（从高到低）
+    /// ```text
+    /// trace > debug > info > warn > error
+    /// ```
+    ///
+    /// ### 使用示例
+    /// ```bash
+    /// msb --debug run myapp    # 显示 debug 及以上级别
+    /// msb --error run myapp    # 仅显示 error 级别
+    /// ```
+
+    /// 仅显示错误级别日志
     #[arg(long, global = true)]
     pub error: bool,
 
-    /// Show logs with warn level
+    /// 仅显示警告级别日志
     #[arg(long, global = true)]
     pub warn: bool,
 
-    /// Show logs with info level
+    /// 仅显示信息级别日志
     #[arg(long, global = true)]
     pub info: bool,
 
-    /// Show logs with debug level
+    /// 显示调试级别日志
     #[arg(long, global = true)]
     pub debug: bool,
 
-    /// Show logs with trace level
+    /// 显示追踪级别日志（最详细）
     #[arg(long, global = true)]
     pub trace: bool,
 }
 
-/// Available subcommands for managing services
+/// ## MicrosandboxSubcommand 枚举
+///
+/// 定义 msb 命令的所有子命令。
+/// 每个枚举变体代表一个子命令，包含该子命令特有的参数。
+///
+/// ### 命令别名（alias）
+/// 许多命令有缩写形式：
+/// - `rm` = `remove`
+/// - `r` = `run`
+/// - `x` = `exe`
+/// - `i` = `install`
+/// - `ps`/`stat` = `status`
 #[derive(Debug, Parser)]
 pub enum MicrosandboxSubcommand {
-    /// Initialize a new microsandbox project
+    /// ### 初始化微沙箱项目
+    ///
+    /// 在当前目录或指定目录创建微沙箱项目的配置文件。
+    ///
+    /// ### 使用示例
+    /// ```bash
+    /// msb init                    # 在当前目录初始化
+    /// msb init -f /path/to/proj   # 在指定目录初始化
+    /// ```
     #[command(name = "init")]
     Init {
-        /// Path to the sandbox file or the project directory
+        /// ### 配置文件或项目目录路径
+        ///
+        /// 可以是：
+        /// - 配置文件路径（如 `microsandbox.yaml`）
+        /// - 项目目录路径（会在其中创建默认配置文件）
         #[arg(short, long)]
         file: Option<PathBuf>,
     },
 
-    /// Add a new sandbox to the project
+    /// ### 添加新沙箱到项目
+    ///
+    /// 向项目配置中添加一个新的沙箱定义。
+    ///
+    /// ### 使用示例
+    /// ```bash
+    /// # 添加一个简单的沙箱
+    /// msb add myapp --image python:3.9
+    ///
+    /// # 添加带资源配置的沙箱
+    /// msb add myapp --image python:3.9 --memory 1024 --cpus 2
+    ///
+    /// # 添加带端口映射的沙箱
+    /// msb add webapp --image nginx --port 8080:80
+    /// ```
     #[command(name = "add")]
     Add {
-        /// Whether command should apply to a sandbox
+        /// ### --sandbox 标志
+        ///
+        /// 指定操作应用于沙箱（而非构建沙箱）。
+        /// 这是默认行为，通常不需要显式指定。
         #[arg(short, long)]
         sandbox: bool,
 
-        /// Whether command should apply to a build sandbox
+        /// ### --build 标志
+        ///
+        /// 指定操作应用于构建沙箱。
+        /// 构建沙箱用于从沙箱构建镜像。
         #[arg(short, long)]
         build: bool,
 
-        /// Names of components to add
+        /// ### 沙箱名称
+        ///
+        /// 要添加的沙箱名称。
+        /// 名称在项目中必须唯一。
         #[arg(required = true)]
         names: Vec<String>,
 
-        /// Image to use
+        /// ### 镜像名称
+        ///
+        /// 沙箱使用的 OCI 镜像名称。
+        /// 格式：`registry/namespace/image:tag`
+        /// 例如：`python:3.9`, `docker.io/library/nginx:latest`
         #[arg(short, long)]
         image: String,
 
-        /// Memory in MiB
+        /// ### 内存限制（MiB）
+        ///
+        /// 沙箱可使用的最大内存，单位 MiB。
         #[arg(long)]
         memory: Option<u32>,
 
-        /// Number of CPUs
+        /// ### CPU 核心数
+        ///
+        /// 分配给沙箱的 CPU 核心数。
+        /// `alias = "cpu"` 允许使用 `--cpu` 作为别名。
         #[arg(long, alias = "cpu")]
         cpus: Option<u32>,
 
-        /// Volume mappings, format: <host_path>:<container_path>
+        /// ### 卷挂载
+        ///
+        /// 将主机目录挂载到沙箱内。
+        ///
+        /// ### 格式
+        /// `<host_path>:<container_path>`
+        ///
+        /// ### 使用示例
+        /// ```bash
+        /// msb add myapp --image python -v /host/data:/data
+        /// ```
         #[arg(short, long = "volume", name = "VOLUME")]
         volumes: Vec<String>,
 
-        /// Port mappings, format: <host_port>:<container_port>
+        /// ### 端口映射
+        ///
+        /// 将沙箱端口转发到主机。
+        ///
+        /// ### 格式
+        /// `<host_port>:<container_port>`
+        ///
+        /// ### 使用示例
+        /// ```bash
+        /// msb add webapp --image nginx -p 8080:80
+        /// ```
         #[arg(short, long = "port", name = "PORT")]
         ports: Vec<String>,
 
-        /// Environment variables, format: <key>=<value>
+        /// ### 环境变量
+        ///
+        /// 设置沙箱内的环境变量。
+        ///
+        /// ### 格式
+        /// `<key>=<value>`
+        ///
+        /// ### 使用示例
+        /// ```bash
+        /// msb add myapp --image python --env PATH=/usr/bin --env DEBUG=true
+        /// ```
         #[arg(long = "env", name = "ENV")]
         envs: Vec<String>,
 
-        /// Environment file
+        /// ### 环境变量文件
+        ///
+        /// 从文件读取环境变量。
+        /// 文件格式通常是每行一个 `KEY=VALUE`。
         #[arg(long)]
         env_file: Option<Utf8UnixPathBuf>,
 
-        /// Dependencies
+        /// ### 依赖沙箱
+        ///
+        /// 指定此沙箱依赖的其他沙箱名称。
+        /// 启动时会自动先启动依赖的沙箱。
         #[arg(long)]
         depends_on: Vec<String>,
 
-        /// Working directory
+        /// ### 工作目录
+        ///
+        /// 沙箱内进程的初始工作目录。
         #[arg(long)]
         workdir: Option<Utf8UnixPathBuf>,
 
-        /// Shell to use
+        /// ### Shell 类型
+        ///
+        /// 指定沙箱内使用的 shell 程序。
+        /// 例如：`bash`, `sh`, `zsh`
         #[arg(long)]
         shell: Option<String>,
 
-        /// Scripts to add
+        /// ### 自定义脚本
+        ///
+        /// 添加自定义脚本到沙箱。
+        ///
+        /// ### 格式
+        /// `script_name=script_content`
+        ///
+        /// ### `value_parser = parse_key_val` 说明
+        /// 使用自定义解析器将 `NAME=VALUE` 格式解析为元组。
         #[arg(long = "script", name = "SCRIPT", value_parser = parse_key_val::<String, String>)]
         scripts: Vec<(String, String)>,
 
-        /// Start script
+        /// ### 启动脚本
+        ///
+        /// 沙箱启动时自动执行的脚本。
+        /// 这是 `--script` 的特殊形式，脚本名为 "start"。
         #[arg(long)]
         start: Option<String>,
 
-        /// Files to import, format: <name>=<path>
+        /// ### 导入文件
+        ///
+        /// 将文件从主机导入到沙箱。
+        ///
+        /// ### 格式
+        /// `<name>=<path>`
         #[arg(long = "import", name = "IMPORT", value_parser = parse_key_val::<String, String>)]
         imports: Vec<(String, String)>,
 
-        /// Files to export, format: <name>=<path>
+        /// ### 导出文件
+        ///
+        /// 将文件从沙箱导出到主机。
+        ///
+        /// ### 格式
+        /// `<name>=<path>`
         #[arg(long = "export", name = "EXPORT", value_parser = parse_key_val::<String, String>)]
         exports: Vec<(String, String)>,
 
-        /// Network scope, options: local, public, any, none
+        /// ### 网络作用域
+        ///
+        /// 控制沙箱的网络访问范围。
+        ///
+        /// ### 可选值
+        /// - `local`: 仅本地网络
+        /// - `public`: 可访问公网
+        /// - `any`: 无限制
+        /// - `none`: 无网络
         #[arg(long)]
         scope: Option<String>,
 
-        /// Path to the sandbox file or the project directory
+        /// ### 配置文件路径
+        ///
+        /// 指定沙箱配置文件或项目目录。
         #[arg(short, long)]
         file: Option<PathBuf>,
     },
 
-    /// Remove a sandbox from the project
+    /// ### 从项目中删除沙箱
+    ///
+    /// 从项目配置中移除指定的沙箱。
+    ///
+    /// ### 别名
+    /// `rm` 是 `remove` 的缩写形式。
     #[command(name = "remove", alias = "rm")]
     Remove {
-        /// Whether command should apply to a sandbox
+        /// 是否应用于沙箱
         #[arg(short, long)]
         sandbox: bool,
 
-        /// Whether command should apply to a build sandbox
+        /// 是否应用于构建沙箱
         #[arg(short, long)]
         build: bool,
 
-        /// Names of components to remove
+        /// 要删除的沙箱名称
         #[arg(required = true)]
         names: Vec<String>,
 
-        /// Path to the sandbox file or the project directory
+        /// 配置文件路径
         #[arg(short, long)]
         file: Option<PathBuf>,
     },
 
-    /// List sandboxes defined in the project
+    /// ### 列出项目中的沙箱
+    ///
+    /// 显示项目中定义的所有沙箱。
     #[command(name = "list")]
     List {
-        /// Whether command should apply to a sandbox
+        /// 是否仅列出沙箱
         #[arg(short, long)]
         sandbox: bool,
 
-        /// Whether command should apply to a build sandbox
+        /// 是否仅列出构建沙箱
         #[arg(short, long)]
         build: bool,
 
-        /// Path to the sandbox file or the project directory
+        /// 配置文件路径
         #[arg(short, long)]
         file: Option<PathBuf>,
     },
 
-    /// Show logs of a build or sandbox
+    /// ### 显示沙箱日志
+    ///
+    /// 查看沙箱的输出日志。
+    ///
+    /// ### 使用示例
+    /// ```bash
+    /// msb log myapp              # 查看 myapp 的日志
+    /// msb log -f myapp           # 实时跟踪日志（类似 tail -f）
+    /// msb log -t 100 myapp       # 查看最后 100 行
+    /// ```
     #[command(name = "log")]
     Log {
-        /// Whether command should apply to a sandbox
+        /// 是否应用于沙箱
         #[arg(short, long)]
         sandbox: bool,
 
-        /// Whether command should apply to a build sandbox
+        /// 是否应用于构建沙箱
         #[arg(short, long)]
         build: bool,
 
-        /// Name of the component
+        /// 沙箱名称
         #[arg(required = true)]
         name: String,
 
-        /// Path to the sandbox file or the project directory
+        /// 配置文件路径
         #[arg(short, long)]
         file: Option<PathBuf>,
 
-        /// Follow the logs
+        /// ### 实时跟踪模式
+        ///
+        /// 持续输出新日志（类似 `tail -f`）。
+        /// 需要系统安装了 `tail` 命令。
         #[arg(short = 'F', long)]
         follow: bool,
 
-        /// Number of lines to show from the end
+        /// ### 显示行数
+        ///
+        /// 显示末尾多少行日志。
         #[arg(short, long)]
         tail: Option<usize>,
     },
 
-    /// Show tree of layers that make up a sandbox
+    /// ### 显示沙箱层级树
+    ///
+    /// 以树形结构显示组成沙箱的镜像层。
+    /// 类似于 Docker 的 `docker image inspect`。
     #[command(name = "tree")]
     Tree {
-        /// Whether command should apply to a sandbox
+        /// 是否应用于沙箱
         #[arg(short, long)]
         sandbox: bool,
 
-        /// Whether command should apply to a build sandbox
+        /// 是否应用于构建沙箱
         #[arg(short, long)]
         build: bool,
 
-        /// Names of components to show
+        /// 沙箱名称
         #[arg(required = true)]
         names: Vec<String>,
 
-        /// Maximum depth level
+        /// ### 最大深度
+        ///
+        /// 限制显示的层级深度。
+        /// `--level 2` 只显示前两层。
         #[arg(short = 'L', long)]
         level: Option<usize>,
     },
 
-    /// Run a sandbox defined in the project
+    /// ### 运行沙箱
+    ///
+    /// 启动并运行项目中定义的沙箱。
+    ///
+    /// ### 别名
+    /// `r` 是 `run` 的缩写形式。
+    ///
+    /// ### 名称格式
+    /// `NAME[~SCRIPT]` 表示可以指定沙箱名称和脚本：
+    /// - `myapp` - 运行默认脚本
+    /// - `myapp~shell` - 运行 shell 脚本
+    ///
+    /// ### 使用示例
+    /// ```bash
+    /// msb run myapp              # 运行沙箱
+    /// msb run myapp~shell        # 运行 shell 脚本
+    /// msb run -d myapp           # 后台运行
+    /// msb run -x "python app.py" # 执行指定命令
+    /// ```
     #[command(name = "run", alias = "r")]
     Run {
-        /// Whether command should apply to a sandbox
+        /// 是否应用于沙箱
         #[arg(short, long)]
         sandbox: bool,
 
-        /// Whether command should apply to a build sandbox
+        /// 是否应用于构建沙箱
         #[arg(short, long)]
         build: bool,
 
-        /// Name of the component
+        /// 沙箱名称（可带脚本）
         #[arg(required = true, name = "NAME[~SCRIPT]")]
         name: String,
 
-        /// Path to the sandbox file or the project directory
+        /// 配置文件路径
         #[arg(short, long)]
         file: Option<PathBuf>,
 
-        /// Run sandbox in the background
+        /// ### 后台运行
+        ///
+        /// 在后台运行沙箱，不阻塞终端。
+        /// 也称为 "detach mode"（分离模式）。
         #[arg(short, long)]
         detach: bool,
 
-        /// Execute a command within the sandbox
+        /// ### 执行命令
+        ///
+        /// 在沙箱内执行指定的命令，而不是默认脚本。
+        ///
+        /// ### 别名
+        /// `-x` 是 `--exec` 的缩写。
         #[arg(short, long, short_alias = 'x')]
         exec: Option<String>,
 
-        /// Additional arguments after `--`. Passed to the script or exec.
+        /// ### 额外参数
+        ///
+        /// 传递给脚本或命令的参数。
+        ///
+        /// ### `last = true` 说明
+        /// 收集 `--` 之后的所有参数：
+        /// ```bash
+        /// msb run myapp -- arg1 arg2 arg3
+        /// ```
         #[arg(last = true)]
         args: Vec<String>,
     },
 
-    /// Open a shell in a sandbox
+    /// ### 打开沙箱 Shell
+    ///
+    /// 在沙箱内启动一个交互式 shell 会话。
+    /// 这是 `run` 命令的特例，自动运行 "shell" 脚本。
+    ///
+    /// ### 使用示例
+    /// ```bash
+    /// msb shell myapp            # 打开默认 shell
+    /// msb shell myapp -- -l      # 作为登录 shell
+    /// ```
     #[command(name = "shell")]
     Shell {
-        /// Whether command should apply to a sandbox
+        /// 是否应用于沙箱
         #[arg(short, long)]
         sandbox: bool,
 
-        /// Whether command should apply to a build sandbox
+        /// 是否应用于构建沙箱
         #[arg(short, long)]
         build: bool,
 
-        /// Name of the component
+        /// 沙箱名称
         #[arg(required = true)]
         name: String,
 
-        /// Path to the sandbox file or the project directory
+        /// 配置文件路径
         #[arg(short, long)]
         file: Option<PathBuf>,
 
-        /// Run sandbox in the background
+        /// 后台运行
         #[arg(short, long)]
         detach: bool,
 
-        /// Additional arguments after `--`. Passed to the shell.
+        /// 传递给 shell 的额外参数
         #[arg(last = true)]
         args: Vec<String>,
     },
 
-    /// Run a temporary sandbox
+    /// ### 运行临时沙箱
+    ///
+    /// 直接从镜像运行临时沙箱，无需预先定义。
+    /// 沙箱在退出后不会保留。
+    ///
+    /// ### 别名
+    /// `x` 是 `exe` 的缩写。
+    ///
+    /// ### 与 `run` 的区别
+    /// - `run`: 运行项目中已定义的沙箱
+    /// - `exe`: 直接从镜像运行临时沙箱
+    ///
+    /// ### 使用示例
+    /// ```bash
+    /// # 运行 Python 沙箱
+    /// msb exe python:3.9 -- python -c "print('hello')"
+    ///
+    /// # 运行带端口映射的 nginx
+    /// msb exe nginx -p 8080:80
+    /// ```
     #[command(name = "exe", alias = "x")]
     Exe {
-        /// Whether command should apply to a sandbox
+        /// 是否应用于镜像（已废弃，保留用于兼容）
         #[arg(short, long)]
         image: bool,
 
-        /// Name of the image
+        /// 镜像名称（可带脚本）
         #[arg(required = true, name = "NAME[~SCRIPT]")]
         name: String,
 
-        /// Number of CPUs
+        /// CPU 核心数
         #[arg(long, alias = "cpu")]
         cpus: Option<u8>,
 
-        /// Memory in MB
+        /// 内存（MB）
         #[arg(long)]
         memory: Option<u32>,
 
-        /// Volume mappings, format: <host_path>:<container_path>
+        /// 卷挂载
         #[arg(short, long = "volume", name = "VOLUME")]
         volumes: Vec<String>,
 
-        /// Port mappings, format: <host_port>:<container_port>
+        /// 端口映射
         #[arg(short, long = "port", name = "PORT")]
         ports: Vec<String>,
 
-        /// Environment variables, format: <key>=<value>
+        /// 环境变量
         #[arg(long = "env", name = "ENV")]
         envs: Vec<String>,
 
-        /// Working directory
+        /// 工作目录
         #[arg(long)]
         workdir: Option<Utf8UnixPathBuf>,
 
-        /// Network scope, options: local, public, any, none
+        /// 网络作用域
         #[arg(long)]
         scope: Option<String>,
 
-        /// Execute a command within the sandbox
+        /// 执行命令
         #[arg(short, long, short_alias = 'x')]
         exec: Option<String>,
 
-        /// Additional arguments after `--`. Passed to the script or exec.
+        /// 额外参数
         #[arg(last = true)]
         args: Vec<String>,
     },
 
-    /// Install a script from an image
+    /// ### 安装全局脚本
+    ///
+    /// 从镜像安装脚本到用户级别，使其可在任何目录运行。
+    /// 类似于 `npm install -g`。
+    ///
+    /// ### 别名
+    /// `i` 是 `install` 的缩写。
+    ///
+    /// ### 使用示例
+    /// ```bash
+    /// # 安装 Python 脚本
+    /// msb install python:3.9~my_script.py
+    ///
+    /// # 安装并指定别名
+    /// msb install python:3.9~script.py myscript
+    /// ```
     #[command(name = "install", alias = "i")]
     Install {
-        /// Whether command should apply to a sandbox
+        /// 是否应用于镜像
         #[arg(short, long)]
         image: bool,
 
-        /// Name of the image
+        /// 镜像名称（可带脚本）
         #[arg(required = true, name = "NAME[~SCRIPT]")]
         name: String,
 
-        /// Alias for the script
+        /// ### 别名
+        ///
+        /// 为安装的脚本指定一个别名。
+        /// 如不指定，使用镜像名的最后一部分。
         #[arg()]
         alias: Option<String>,
 
-        /// Number of CPUs
+        /// CPU 核心数
         #[arg(long, alias = "cpu")]
         cpus: Option<u8>,
 
-        /// Memory in MB
+        /// 内存（MB）
         #[arg(long)]
         memory: Option<u32>,
 
-        /// Volume mappings, format: <host_path>:<container_path>
+        /// 卷挂载
         #[arg(short, long = "volume", name = "VOLUME")]
         volumes: Vec<String>,
 
-        /// Port mappings, format: <host_port>:<container_port>
+        /// 端口映射
         #[arg(short, long = "port", name = "PORT")]
         ports: Vec<String>,
 
-        /// Environment variables, format: <key>=<value>
+        /// 环境变量
         #[arg(long = "env", name = "ENV")]
         envs: Vec<String>,
 
-        /// Working directory
+        /// 工作目录
         #[arg(long)]
         workdir: Option<Utf8UnixPathBuf>,
 
-        /// Network scope, options: local, public, any, none
+        /// 网络作用域
         #[arg(long)]
         scope: Option<String>,
 
-        /// Execute a command within the sandbox
+        /// 执行命令
         #[arg(short, long, short_alias = 'x')]
         exec: Option<String>,
 
-        /// Additional arguments after `--`. Passed to the script or exec.
+        /// 传递给脚本的参数（运行时使用）
         #[arg(last = true)]
         args: Vec<String>,
     },
 
-    /// Uninstall a script
+    /// ### 卸载全局脚本
+    ///
+    /// 移除之前安装的全局脚本别名。
     #[command(name = "uninstall")]
     Uninstall {
-        /// Script to uninstall
+        /// 要卸载的脚本名称
         script: Option<String>,
     },
 
-    /// Start or stop project sandboxes based on configuration
+    /// ### 应用项目配置
+    ///
+    /// 根据配置文件启动或停止所有沙箱。
+    /// 类似于 Docker Compose 的 `up`。
     #[command(name = "apply")]
     Apply {
-        /// Path to the sandbox file or the project directory
+        /// 配置文件路径
         #[arg(short, long)]
         file: Option<PathBuf>,
 
-        /// Run sandboxes in the background
+        /// 后台运行
         #[arg(short, long)]
         detach: bool,
     },
 
-    /// Run a project's sandboxes
+    /// ### 启动项目沙箱
+    ///
+    /// 启动项目中定义的所有或指定沙箱。
+    ///
+    /// ### 使用示例
+    /// ```bash
+    /// msb up                 # 启动所有沙箱
+    /// msb up webapp db       # 启动指定的沙箱
+    /// ```
     #[command(name = "up")]
     Up {
-        /// Whether command should apply to a sandbox
+        /// 是否应用于沙箱
         #[arg(short, long)]
         sandbox: bool,
 
-        /// Whether command should apply to a build sandbox
+        /// 是否应用于构建沙箱
         #[arg(short, long)]
         build: bool,
 
-        /// Names of components to start. If omitted, starts all sandboxes defined in the configuration.
+        /// 要启动的沙箱名称
+        /// 如省略，启动配置文件中定义的所有沙箱。
         names: Vec<String>,
 
-        /// Path to the sandbox file or the project directory
+        /// 配置文件路径
         #[arg(short, long)]
         file: Option<PathBuf>,
 
-        /// Run sandboxes in the background
+        /// 后台运行
         #[arg(short, long)]
         detach: bool,
     },
 
-    /// Stop a project's sandboxes
+    /// ### 停止项目沙箱
+    ///
+    /// 停止项目中定义的所有或指定沙箱。
+    ///
+    /// ### 使用示例
+    /// ```bash
+    /// msb down               # 停止所有沙箱
+    /// msb down webapp        # 停止指定的沙箱
+    /// ```
     #[command(name = "down")]
     Down {
-        /// Whether command should apply to a sandbox
+        /// 是否应用于沙箱
         #[arg(short, long)]
         sandbox: bool,
 
-        /// Whether command should apply to a build sandbox
+        /// 是否应用于构建沙箱
         #[arg(short, long)]
         build: bool,
 
-        /// Names of components to stop. If omitted, stops all sandboxes defined in the configuration.
+        /// 要停止的沙箱名称
+        /// 如省略，停止配置文件中定义的所有沙箱。
         names: Vec<String>,
 
-        /// Path to the sandbox file or the project directory
+        /// 配置文件路径
         #[arg(short, long)]
         file: Option<PathBuf>,
     },
 
-    /// Show statuses of a project's running sandboxes
+    /// ### 显示沙箱状态
+    ///
+    /// 显示运行中沙箱的状态信息（CPU、内存、网络等）。
+    ///
+    /// ### 别名
+    /// `ps` 和 `stat` 是 `status` 的别名。
     #[command(name = "status", alias = "ps", alias = "stat")]
     Status {
-        /// Whether command should apply to a sandbox
+        /// 是否应用于沙箱
         #[arg(short, long)]
         sandbox: bool,
 
-        /// Whether command should apply to a build sandbox
+        /// 是否应用于构建沙箱
         #[arg(short, long)]
         build: bool,
 
-        /// Names of components to show status for
+        /// 要显示状态的沙箱名称
         #[arg()]
         names: Vec<String>,
 
-        /// Path to the sandbox file or the project directory
+        /// 配置文件路径
         #[arg(short, long)]
         file: Option<PathBuf>,
     },
 
-    /// Clean cached sandbox layers, metadata, etc.
+    /// ### 清理缓存
+    ///
+    /// 清理沙箱层、元数据等缓存文件。
+    ///
+    /// ### 使用示例
+    /// ```bash
+    /// msb clean               # 清理当前项目
+    /// msb clean --user        # 清理用户级缓存
+    /// msb clean --all         # 清理所有
+    /// msb clean myapp         # 清理指定沙箱
+    /// ```
     #[command(name = "clean")]
     Clean {
-        /// Whether command should apply to a sandbox
+        /// 是否应用于沙箱
         #[arg(short, long)]
         sandbox: bool,
 
-        /// Name of the component
+        /// 沙箱名称
         #[arg()]
         name: Option<String>,
 
-        /// Clean user-level caches. This cleans $MICROSANDBOX_HOME
+        /// ### 清理用户级缓存
+        ///
+        /// 清理 `$MICROSANDBOX_HOME` 目录。
+        /// 这会影响所有项目。
         #[arg(short, long)]
         user: bool,
 
-        /// Clean all
+        /// ### 清理所有
+        ///
+        /// 同时清理用户级和项目级缓存。
         #[arg(short, long)]
         all: bool,
 
-        /// Path to the sandbox file or the project directory
+        /// 配置文件路径
         #[arg(short, long)]
         file: Option<PathBuf>,
 
-        /// Force clean
+        /// ### 强制清理
+        ///
+        /// 不询问确认，直接删除。
         #[arg(short = 'F', long)]
         force: bool,
     },
 
-    /// Build images
+    /// ### 构建镜像
+    ///
+    /// 从沙箱或构建定义构建 OCI 镜像。
     #[command(name = "build")]
     Build {
-        /// Build from sandbox
+        /// 从沙箱构建
         #[arg(short, long)]
         sandbox: bool,
 
-        /// Build from build definition
+        /// 从构建定义构建
         #[arg(short, long)]
         build: bool,
 
-        /// Names of components to build
+        /// 要构建的沙箱名称
         #[arg(required = true)]
         names: Vec<String>,
 
-        /// Create a snapshot
+        /// ### 创建快照
+        ///
+        /// 创建沙箱的快照镜像，而不是完整镜像。
+        /// 快照只包含变更层。
         #[arg(long)]
         snapshot: bool,
     },
 
-    /// Pull image from a registry
+    /// ### 拉取镜像
+    ///
+    /// 从容器镜像仓库拉取镜像到本地。
+    ///
+    /// ### 使用示例
+    /// ```bash
+    /// msb pull python:3.9
+    /// msb pull docker.io/library/nginx:latest
+    /// ```
     #[command(name = "pull")]
     Pull {
-        /// Name of the image
+        /// 镜像名称
+        /// 类型 `Reference` 是 OCI 镜像引用格式。
         #[arg(required = true)]
         name: Reference,
 
-        /// Path to store the layer files
+        /// ### 层文件存储路径
+        ///
+        /// 指定存储镜像层文件的目录。
+        /// 如不指定，使用默认缓存目录。
         #[arg(short = 'L', long)]
         layer_path: Option<PathBuf>,
     },
 
-    /// Login to a registry
+    /// ### 登录镜像仓库
+    ///
+    /// 登录到容器镜像仓库（如 Docker Hub）。
+    /// 用于拉取私有镜像或推送镜像。
     #[command(name = "login")]
     Login,
 
-    /// Push image to a registry
+    /// ### 推送镜像
+    ///
+    /// 将本地镜像推送到远程仓库。
+    ///
+    /// ### 使用示例
+    /// ```bash
+    /// msb push myimage:latest
+    /// msb push --image myimage:latest
+    /// ```
     #[command(name = "push")]
     Push {
-        /// Whether command should apply to an image
+        /// 是否应用于镜像
         #[arg(short, long)]
         image: bool,
 
-        /// Name of the image
+        /// 镜像名称
         #[arg(required = true)]
         name: String,
     },
 
-    /// Manage microsandbox itself
+    /// ### 管理 microsandbox 自身
+    ///
+    /// 升级或卸载 microsandbox 工具。
     #[command(name = "self")]
     Self_ {
-        /// Action to perform
+        /// ### 操作类型
+        ///
+        /// 使用 `#[arg(value_enum)]` 从 `SelfAction` 枚举定义可选值。
         #[arg(value_enum)]
         action: SelfAction,
     },
 
-    /// Start a sandbox server for orchestrating and working with sandboxes
+    /// ### 管理沙箱服务器
+    ///
+    /// 启动、停止沙箱服务器，或执行服务器相关操作。
+    /// 服务器提供 API 接口和 MCP（Model Context Protocol）服务。
     #[command(name = "server")]
     Server {
-        /// The subcommand to run
+        /// 服务器子命令
         #[command(subcommand)]
         subcommand: ServerSubcommand,
     },
 
-    /// Print version of microsandbox
+    /// ### 显示版本号
+    ///
+    /// 打印 microsandbox 的版本信息。
     #[command(name = "version")]
     Version,
 }
 
-/// Subcommands for the server subcommand
+/// ## ServerSubcommand 枚举
+///
+/// `msb server` 命令的子命令。
+/// 用于管理沙箱服务器（API 服务器和 MCP 服务器）。
 #[derive(Debug, Parser)]
 pub enum ServerSubcommand {
-    /// Start the sandbox server which is also an MCP server
+    /// ### 启动沙箱服务器
+    ///
+    /// 启动一个 HTTP API 服务器，提供：
+    /// - REST API 用于沙箱管理
+    /// - MCP（Model Context Protocol）接口
+    /// - WebSocket 实时通信
+    ///
+    /// ### 使用示例
+    /// ```bash
+    /// msb server start                    # 使用默认设置启动
+    /// msb server start --port 8080        # 指定端口
+    /// msb server start -d                 # 后台运行
+    /// ```
     Start {
-        /// Host to listen on
+        /// 监听主机地址
         #[arg(long)]
         host: Option<String>,
 
-        /// Port to listen on
+        /// 监听端口
         #[arg(long)]
         port: Option<u16>,
 
-        /// Project directory for storing sandbox configurations and state
+        /// 项目目录
         #[arg(short = 'p', long = "path")]
         project_dir: Option<PathBuf>,
 
-        /// Run server in development mode
+        /// ### 开发模式
+        ///
+        /// 启用开发模式，提供更详细的日志和调试功能。
         #[arg(long = "dev")]
         dev_mode: bool,
 
-        /// Set secret key for server. Automatically generated if not provided.
+        /// ### 密钥
+        ///
+        /// 用于 JWT 令牌生成和验证的密钥。
+        /// 如不指定，自动生成随机密钥。
         #[arg(short, long)]
         key: Option<String>,
 
-        /// Run server in the background
+        /// 后台运行
         #[arg(short, long)]
         detach: bool,
 
-        /// Reset the server key
+        /// ### 重置密钥
+        ///
+        /// 重新生成新的服务器密钥。
         #[arg(short, long)]
         reset_key: bool,
     },
 
-    /// Stop the sandbox server
+    /// ### 停止沙箱服务器
+    ///
+    /// 停止正在运行的沙箱服务器进程。
     Stop,
 
-    /// Generate a new API key
+    /// ### 生成 API 密钥
+    ///
+    /// 生成一个新的 API 密钥用于认证。
+    ///
+    /// ### 使用示例
+    /// ```bash
+    /// msb server keygen                   # 生成默认有效期的密钥
+    /// msb server keygen --expire 1h       # 1 小时后过期
+    /// msb server keygen --expire 7d       # 7 天后过期
+    /// ```
     #[command(name = "keygen")]
     Keygen {
-        /// Token expiration duration. format: 1s, 2m, 3h, 4d, 5w, 6mo, 7y
+        /// ### 令牌过期时间
+        ///
+        /// 格式：`<数字><单位>`
+        ///
+        /// ### 支持的时间单位
+        /// | 单位 | 含义 |
+        /// |------|------|
+        /// | `s` | 秒 |
+        /// | `m` | 分钟 |
+        /// | `h` | 小时 |
+        /// | `d` | 天 |
+        /// | `w` | 周 |
+        /// | `mo` | 月（30 天） |
+        /// | `y` | 年（365 天） |
         #[arg(long)]
         expire: Option<String>,
     },
 
-    /// Show logs of a sandbox
+    /// ### 显示服务器沙箱日志
+    ///
+    /// 查看服务器管理的沙箱的日志。
     #[command(name = "log")]
     Log {
-        /// Whether command should apply to a sandbox
+        /// 是否应用于沙箱
         #[arg(short, long)]
         sandbox: bool,
 
-        /// Name of the component
+        /// 沙箱名称
         #[arg(required = true)]
         name: String,
 
-        /// Follow the logs
+        /// 实时跟踪
         #[arg(short, long)]
         follow: bool,
 
-        /// Number of lines to show from the end
+        /// 显示行数
         #[arg(short, long)]
         tail: Option<usize>,
     },
 
-    /// List sandboxes
+    /// ### 列出服务器沙箱
+    ///
+    /// 显示服务器管理的所有沙箱。
     #[command(name = "list")]
     List,
 
-    /// Show server status
+    /// ### 显示服务器沙箱状态
+    ///
+    /// 显示服务器管理的沙箱的运行状态。
     #[command(name = "status")]
     Status {
-        /// Whether command should apply to a sandbox
+        /// 是否应用于沙箱
         #[arg(short, long)]
         sandbox: bool,
 
-        /// Name of the component
+        /// 沙箱名称
         #[arg()]
         names: Vec<String>,
     },
 
-    /// SSH into a sandbox
+    /// ### SSH 连接到沙箱
+    ///
+    /// 通过 SSH 协议连接到沙箱。
+    /// （当前版本未实现）
     #[command(name = "ssh")]
     Ssh {
-        /// Whether to SSH into a sandbox
+        /// 是否 SSH 到沙箱
         #[arg(short, long)]
         sandbox: bool,
 
-        /// Name of the sandbox
+        /// 沙箱名称
         #[arg(required = true)]
         name: String,
     },
 }
 
-/// Actions for the self subcommand
+/// ## SelfAction 枚举
+///
+/// 定义 `msb self` 命令的可用操作。
+/// 使用 `clap::ValueEnum` 派生，clap 会自动处理枚举值的解析。
+///
+/// ### 使用示例
+/// ```bash
+/// msb self upgrade      # 升级 microsandbox
+/// msb self uninstall    # 卸载 microsandbox
+/// ```
 #[derive(Debug, Clone, clap::ValueEnum)]
 pub enum SelfAction {
-    /// Upgrade microsandbox
+    /// 升级 microsandbox 到最新版本
     Upgrade,
 
-    /// Uninstall microsandbox
+    /// 从系统中卸载 microsandbox
     Uninstall,
 }
 
 //-------------------------------------------------------------------------------------------------
-// Functions: Helpers
+// Functions: Helper Functions - 辅助函数
 //-------------------------------------------------------------------------------------------------
 
+/// ## 解析 KEY=VALUE 格式的字符串
+///
+/// 这是一个通用的键值对解析函数，用于解析命令行参数中的 `KEY=VALUE` 格式。
+///
+/// ### 泛型参数
+/// - `T`: 键的类型，必须实现 `FromStr` trait
+/// - `U`: 值的类型，必须实现 `FromStr` trait
+///
+/// ### 参数
+/// - `s`: 输入字符串，格式为 `KEY=VALUE`
+///
+/// ### 返回值
+/// - `Ok((key, value))`: 解析成功，返回键值对元组
+/// - `Err(...)`: 解析失败，返回错误
+///
+/// ### 使用示例
+/// ```rust,ignore
+/// let result = parse_key_val::<String, String>("name=value");
+/// assert_eq!(result, Ok(("name".to_string(), "value".to_string())));
+/// ```
+///
+/// ### `where` 子句说明
+/// ```rust,ignore
+/// where
+///     T: std::str::FromStr,              // T 可以从字符串解析
+///     T::Err: Error + Send + Sync + 'static,  // T 的错误类型可以实现这些 trait
+///     U: std::str::FromStr,              // U 可以从字符串解析
+///     U::Err: Error + Send + Sync + 'static,  // U 的错误类型可以实现这些 trait
+/// ```
 fn parse_key_val<T, U>(s: &str) -> Result<(T, U), Box<dyn Error + Send + Sync + 'static>>
 where
     T: std::str::FromStr,
@@ -670,9 +1138,13 @@ where
     U: std::str::FromStr,
     U::Err: Error + Send + Sync + 'static,
 {
+    // 查找等号的位置
     let pos = s
         .find('=')
         .ok_or_else(|| format!("invalid KEY=value: no `=` found in `{s}`"))?;
 
+    // 分割字符串并分别解析键和值
+    // `s[..pos]` 是等号前的部分（键）
+    // `s[pos + 1..]` 是等号后的部分（值）
     Ok((s[..pos].parse()?, s[pos + 1..].parse()?))
 }

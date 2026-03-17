@@ -1,106 +1,109 @@
+//! libkrun FFI 绑定
+//!
+//! 本模块提供了与 libkrun 库的 FFI（Foreign Function Interface）绑定。
+//! libkrun 是用于创建和管理微虚拟机的底层库。
+
 use std::ffi::c_char;
 
 //--------------------------------------------------------------------------------------------------
-// FFI
+// FFI 绑定
 //--------------------------------------------------------------------------------------------------
 
+/// 链接 libkrun 库
+///
+/// 以下所有函数都是 libkrun 库提供的 C API 的 Rust 绑定
 #[link(name = "krun")]
 unsafe extern "C" {
-    /// Sets the log level for the library.
+    /// 设置库的日志级别
     ///
-    /// ## Arguments
+    /// ## 参数
+    /// * `level` - 要设置的日志级别：
+    ///   - `0` - Off（关闭）
+    ///   - `1` - Error（错误）
+    ///   - `2` - Warn（警告）
+    ///   - `3` - Info（信息）
+    ///   - `4` - Debug（调试）
+    ///   - `5` - Trace（追踪）
     ///
-    /// * `level` - The log level to set. The values for the different levels are:
-    ///   - `0` - Off
-    ///   - `1` - Error
-    ///   - `2` - Warn
-    ///   - `3` - Info
-    ///   - `4` - Debug
-    ///   - `5` - Trace
+    /// ## 返回值
+    /// 成功返回 0，失败返回负的错误码
     pub(crate) fn krun_set_log_level(level: u32) -> i32;
 
-    /// Creates a configuration context.
+    /// 创建配置上下文
     ///
-    /// ## Returns
-    ///
-    /// Returns the context ID on success or a negative error number on failure.
+    /// ## 返回值
+    /// 成功返回上下文 ID，失败返回负的错误码
     pub(crate) fn krun_create_ctx() -> i32;
 
-    /// Frees an existing configuration context.
+    /// 释放配置上下文
     ///
-    /// ## Arguments
+    /// ## 参数
+    /// * `ctx_id` - 要释放的配置上下文 ID
     ///
-    /// * `ctx_id` - The configuration context ID to free.
+    /// ## 返回值
+    /// 成功返回 0，失败返回负的错误码
     pub(crate) fn krun_free_ctx(ctx_id: u32) -> i32;
 
-    /// Sets the basic configuration parameters for the MicroVm.
+    /// 设置 MicroVm 的基本配置参数
     ///
-    /// ## Arguments
+    /// ## 参数
+    /// * `ctx_id` - 配置上下文 ID
+    /// * `num_vcpus` - vCPU 数量
+    /// * `ram_mib` - 内存大小（MiB）
     ///
-    /// * `ctx_id` - The configuration context ID.
-    /// * `num_vcpus` - The number of vCPUs.
-    /// * `ram_mib` - The amount of RAM in MiB.
+    /// ## 返回值
+    /// 成功返回 0，失败返回负的错误码
     pub(crate) fn krun_set_vm_config(ctx_id: u32, num_vcpus: u8, ram_mib: u32) -> i32;
 
-    /// Sets the path to be used as root for the MicroVm.
+    /// 设置 MicroVm 的根文件系统路径
     ///
-    /// Not available in libkrun-SEV.
+    /// 不适用于 libkrun-SEV 版本。
     ///
-    /// ## Arguments
+    /// ## 参数
+    /// * `ctx_id` - 配置上下文 ID
+    /// * `root_path` - 要用作根的路径
     ///
-    /// * `ctx_id` - The configuration context ID.
-    /// * `root_path` - The path to be used as root.
+    /// ## 返回值
+    /// 成功返回 0，失败返回负的错误码
     ///
-    /// ## Returns
+    /// ## 错误情况
+    /// * `-EEXIST` - 已经设置了根设备
     ///
-    /// Returns 0 on success or a negative error code on failure.
-    ///
-    /// ## Errors
-    ///
-    /// * `-EEXIST` - A root device is already set
-    ///
-    /// ## Notes
-    ///
-    /// This function is mutually exclusive with `krun_set_overlayfs_root`.
+    /// ## 注意事项
+    /// 此函数与 `krun_set_overlayfs_root` 互斥，不能同时使用。
     pub(crate) fn krun_set_root(ctx_id: u32, root_path: *const c_char) -> i32;
 
-    /// Sets up an OverlayFS to be used as root for the MicroVm.
+    /// 设置使用 OverlayFS 作为 MicroVm 的根文件系统
     ///
-    /// Not available in libkrun-SEV.
+    /// 不适用于 libkrun-SEV 版本。
     ///
-    /// ## Arguments
+    /// ## 参数
+    /// * `ctx_id` - 配置上下文 ID
+    /// * `root_layers` - 空终止字符串指针数组，表示用作 OverlayFS 层的路径
+    ///   必须至少包含一个层
     ///
-    /// * `ctx_id` - The configuration context ID.
-    /// * `root_layers` - A null-terminated array of string pointers representing filesystem paths
-    ///   to be used as layers for the OverlayFS. Must contain at least one layer.
+    /// ## 返回值
+    /// 成功返回 0，失败返回负的错误码
     ///
-    /// ## Returns
+    /// ## 错误情况
+    /// * `-EINVAL` - 未提供任何层
+    /// * `-EEXIST` - 已经设置了根设备
     ///
-    /// Returns 0 on success or a negative error code on failure.
-    ///
-    /// ## Errors
-    ///
-    /// * `-EINVAL` - No layers are provided
-    /// * `-EEXIST` - A root device is already set
-    ///
-    /// ## Notes
-    ///
-    /// This function is mutually exclusive with `krun_set_root`.
+    /// ## 注意事项
+    /// 此函数与 `krun_set_root` 互斥，不能同时使用。
     pub(crate) fn krun_set_overlayfs_root(ctx_id: u32, root_layers: *const *const c_char) -> i32;
 
-    /// Adds a disk image to be used as a general partition for the MicroVm.
+    /// 添加磁盘映像作为 MicroVm 的通用分区
     ///
-    /// This API is mutually exclusive with the deprecated krun_set_root_disk and
-    /// krun_set_data_disk methods and must not be used together.
+    /// 此 API 与已弃用的 `krun_set_root_disk` 和 `krun_set_data_disk` 方法互斥，
+    /// 不得一起使用。
     ///
-    /// ## Arguments
-    ///
-    /// * `ctx_id` - The configuration context ID.
-    /// * `block_id` - A null-terminated string representing the partition.
-    /// * `disk_path` - A null-terminated string representing the path leading to the disk image that
-    ///   contains the root file-system.
-    /// * `read_only` - Whether the mount should be read-only. Required if the caller does not have
-    ///   write permissions (for disk images in /usr/share).
+    /// ## 参数
+    /// * `ctx_id` - 配置上下文 ID
+    /// * `block_id` - 空终止字符串，表示分区
+    /// * `disk_path` - 空终止字符串，表示包含根文件系统的路径
+    /// * `read_only` - 挂载是否为只读（当调用者对 /usr/share 中的磁盘映像
+    ///   没有写权限时需要）
     #[allow(dead_code)]
     pub(crate) fn krun_add_disk(
         ctx_id: u32,
@@ -109,28 +112,34 @@ unsafe extern "C" {
         read_only: bool,
     ) -> i32;
 
-    /// Adds an independent virtio-fs device pointing to a host's directory with a tag.
+    /// 添加独立的 virtio-fs 设备，指向主机目录并带有标签
     ///
-    /// ## Arguments
+    /// virtio-fs 是一种高性能的虚拟化文件系统协议，用于在主机和访客
+    /// 之间共享目录。
     ///
-    /// * `ctx_id` - The configuration context ID.
-    /// * `c_tag` - The tag to identify the filesystem in the guest.
-    /// * `c_path` - The full path to the host's directory to be exposed to the guest.
+    /// ## 参数
+    /// * `ctx_id` - 配置上下文 ID
+    /// * `c_tag` - 用于在访客中标识文件系统的标签
+    /// * `c_path` - 主机上要向访客暴露的目录的完整路径
+    ///
+    /// ## 返回值
+    /// 成功返回 0，失败返回负的错误码
     pub(crate) fn krun_add_virtiofs(
         ctx_id: u32,
         c_tag: *const c_char,
         c_path: *const c_char,
     ) -> i32;
 
-    /// Adds an independent virtio-fs device pointing to a host's directory with a tag. This variant
-    /// allows specifying the size of the DAX window.
+    /// 添加独立的 virtio-fs 设备，指向主机目录并带有标签
     ///
-    /// ## Arguments
+    /// 此变体允许指定 DAX 窗口的大小。DAX（Direct Access）允许
+    /// 直接访问持久内存，提高性能。
     ///
-    /// * `ctx_id` - The configuration context ID.
-    /// * `c_tag` - The tag to identify the filesystem in the guest.
-    /// * `c_path` - The full path to the directory in the host to be exposed to the guest.
-    /// * `shm_size` - The size of the DAX SHM window in bytes.
+    /// ## 参数
+    /// * `ctx_id` - 配置上下文 ID
+    /// * `c_tag` - 用于在访客中标识文件系统的标签
+    /// * `c_path` - 主机上要向访客暴露的目录的完整路径
+    /// * `shm_size` - DAX 共享内存窗口的大小（字节）
     #[allow(dead_code)]
     pub(crate) fn krun_add_virtiofs2(
         ctx_id: u32,
@@ -139,90 +148,81 @@ unsafe extern "C" {
         shm_size: u64,
     ) -> i32;
 
-    /// Configures the networking to use passt.
-    /// Calling this function disables TSI backend to use passt instead.
+    /// 配置网络使用 passt
     ///
-    /// ## Arguments
+    /// 调用此函数会禁用 TSI 后端，改用 passt。
+    /// passt 是一种用户态的网络代理，提供安全的网络连接。
     ///
-    /// * `ctx_id` - The configuration context ID.
-    /// * `fd` - A file descriptor to communicate with passt.
+    /// ## 参数
+    /// * `ctx_id` - 配置上下文 ID
+    /// * `fd` - 用于与 passt 通信的文件描述符
     #[allow(dead_code)]
     pub(crate) fn krun_set_passt_fd(ctx_id: u32, fd: i32) -> i32;
 
-    /// Configures the networking to use gvproxy in vfkit mode.
-    /// Calling this function disables TSI backend to use gvproxy instead.
+    /// 配置网络使用 gvproxy（vfkit 模式）
     ///
-    /// ## Arguments
+    /// 调用此函数会禁用 TSI 后端，改用 gvproxy。
+    /// gvproxy 是 gVisor 的网络代理实现。
     ///
-    /// * `ctx_id` - The configuration context ID.
-    /// * `c_path` - The path to the gvproxy binary.
+    /// ## 参数
+    /// * `ctx_id` - 配置上下文 ID
+    /// * `c_path` - gvproxy 二进制文件的路径
     ///
-    /// ## Note
-    ///
-    /// If you never call this function, networking uses the TSI backend.
-    /// This function should be called before krun_set_port_map.
+    /// ## 注意事项
+    /// 如果从不调用此函数，网络将使用 TSI 后端。
+    /// 此函数应在 `krun_set_port_map` 之前调用。
     #[allow(dead_code)]
     pub(crate) fn krun_set_gvproxy_path(ctx_id: u32, c_path: *const c_char) -> i32;
 
-    /// Sets the MAC address for the virtio-net device when using the passt backend.
+    /// 设置 virtio-net 设备的 MAC 地址（使用 passt 后端时）
     ///
-    /// ## Arguments
-    ///
-    /// * `ctx_id` - The configuration context ID.
-    /// * `c_mac` - The MAC address as an array of 6 uint8_t entries.
+    /// ## 参数
+    /// * `ctx_id` - 配置上下文 ID
+    /// * `c_mac` - MAC 地址，6 字节的 u8 数组
     #[allow(dead_code)]
     pub(crate) fn krun_set_net_mac(ctx_id: u32, c_mac: *const u8) -> i32;
 
-    /// Configures a map of host to guest TCP ports for the MicroVm.
+    /// 配置 MicroVm 的主机到访客 TCP 端口映射
     ///
-    /// ## Arguments
+    /// ## 参数
+    /// * `ctx_id` - 配置上下文 ID
+    /// * `c_port_map` - **空终止**字符串指针数组，格式为 "host_port:guest_port"
     ///
-    /// * `ctx_id` - The configuration context ID.
-    /// * `c_port_map` - A **null-terminated** array of string pointers with format
-    ///   "host_port:guest_port".
+    /// ## 注意事项
+    /// 传递 NULL（或不调用此函数）作为 "port_map" 与传递空数组有不同的含义：
+    /// - NULL：指示 libkrun 尝试将访客中所有监听的端口暴露给主机
+    /// - 空数组：表示访客中的端口都不会暴露给主机
     ///
-    /// ## Note
+    /// 暴露的端口在访客中也只能通过 "host_port" 访问。这意味着对于
+    /// "8080:80" 这样的映射，访客内的应用程序也需要通过 "8080" 端口访问服务。
     ///
-    /// Passing NULL (or not calling this function) as "port_map" has a different meaning than
-    /// passing an empty array. The first one will instruct libkrun to attempt to expose all
-    /// listening ports in the guest to the host, while the second means that no port from the
-    /// guest will be exposed to host.
-    ///
-    /// Exposed ports will only become accessible by their "host_port" in the guest too. This
-    /// means that for a map such as "8080:80", applications running inside the guest will also
-    /// need to access the service through the "8080" port.
-    ///
-    /// If passt networking mode is used (krun_set_passt_fd was called), port mapping is not
-    /// supported as an API of libkrun (but you can still do port mapping using command line
-    /// arguments of passt).
+    /// 如果使用 passt 网络模式（调用了 `krun_set_passt_fd`），端口映射不作为
+    /// libkrun 的 API 支持（但仍可以使用 passt 的命令行参数进行端口映射）。
     pub(crate) fn krun_set_port_map(ctx_id: u32, c_port_map: *const *const c_char) -> i32;
 
-    /// Configures the static IP, subnet, and scope for the TSI network backend.
+    /// 为 TSI 网络后端配置静态 IP、子网和范围
     ///
-    /// ## Arguments
+    /// ## 参数
+    /// * `ctx_id` - 配置上下文 ID
+    /// * `c_ip` - 可选的空终止字符串，表示访客的静态 IPv4 地址
+    /// * `c_subnet` - 可选的空终止字符串，表示 CIDR 格式的访客子网
+    ///   （如 "192.168.1.0/24"）
+    /// * `scope` - 整数，指定范围（0-3）：
+    ///   - `0` - None（无） - 阻止所有 IP 通信
+    ///   - `1` - Group（组） - 允许子网内通信（如果指定；否则像范围 0 一样阻止所有）
+    ///   - `2` - Public（公共） - 允许公共 IP
+    ///   - `3` - Any（任意） - 允许任何 IP
     ///
-    /// * `ctx_id` - The configuration context ID.
-    /// * `c_ip` - An optional null-terminated string representing the guest's static IPv4 address.
-    /// * `c_subnet` - An optional null-terminated string representing the guest's subnet in CIDR notation (e.g., "192.168.1.0/24").
-    /// * `scope` - An integer specifying the scope (0-3):
-    ///   - `0` - None - Block all IP communication
-    ///   - `1` - Group - Allow within subnet (if specified; otherwise, block all like scope 0)
-    ///   - `2` - Public - Allow public IPs
-    ///   - `3` - Any - Allow any IP
+    /// ## 返回值
+    /// 成功返回 0，失败返回负的错误码
     ///
-    /// ## Returns
+    /// ## 错误情况
+    /// * `-EINVAL` - 范围值 > 3 或 IP/子网字符串无效
+    /// * `-ENOTSUP` - 网络模式不是 TSI
     ///
-    /// Returns 0 on success or a negative error number on failure.
-    ///
-    /// ## Errors
-    ///
-    /// * `-EINVAL` - If scope value is > 3 or IP/subnet strings are invalid.
-    /// * `-ENOTSUP` - If the network mode is not TSI.
-    ///
-    /// ## Notes
-    ///
-    /// This function is only effective when the default TSI network backend is used (i.e., neither
-    /// `krun_set_passt_fd` nor `krun_set_gvproxy_path` has been called).
+    /// ## 注意事项
+    /// 此函数仅在使用默认 TSI 网络后端时有效（即未调用
+    /// `krun_set_passt_fd` 或 `krun_set_gvproxy_path`）。
     pub(crate) fn krun_set_tsi_scope(
         ctx_id: u32,
         c_ip: *const c_char,
@@ -230,83 +230,79 @@ unsafe extern "C" {
         scope: u8,
     ) -> i32;
 
-    /// Enables and configures a virtio-gpu device.
+    /// 启用并配置 virtio-gpu 设备
     ///
-    /// ## Arguments
+    /// virtio-gpu 是虚拟化的 GPU 设备，用于提供图形加速功能。
     ///
-    /// * `ctx_id` - The configuration context ID.
-    /// * `virgl_flags` - Flags to pass to virglrenderer.
+    /// ## 参数
+    /// * `ctx_id` - 配置上下文 ID
+    /// * `virgl_flags` - 要传递给 virglrenderer 的标志
     #[allow(dead_code)]
     pub(crate) fn krun_set_gpu_options(ctx_id: u32, virgl_flags: u32) -> i32;
 
-    /// Enables and configures a virtio-gpu device. This variant allows specifying the size of the
-    /// host window (acting as vRAM in the guest).
+    /// 启用并配置 virtio-gpu 设备
     ///
-    /// ## Arguments
+    /// 此变体允许指定主机窗口的大小（在访客中充当显存）。
     ///
-    /// * `ctx_id` - The configuration context ID.
-    /// * `virgl_flags` - Flags to pass to virglrenderer.
-    /// * `shm_size` - The size of the SHM host window in bytes.
+    /// ## 参数
+    /// * `ctx_id` - 配置上下文 ID
+    /// * `virgl_flags` - 要传递给 virglrenderer 的标志
+    /// * `shm_size` - 共享内存主机窗口的大小（字节）
     #[allow(dead_code)]
     pub(crate) fn krun_set_gpu_options2(ctx_id: u32, virgl_flags: u32, shm_size: u64) -> i32;
 
-    /// Enables or disables a virtio-snd device.
+    /// 启用或禁用 virtio-snd 设备
     ///
-    /// ## Arguments
+    /// virtio-snd 是虚拟化的音频设备。
     ///
-    /// * `ctx_id` - The configuration context ID.
-    /// * `enable` - Whether to enable the sound device.
+    /// ## 参数
+    /// * `ctx_id` - 配置上下文 ID
+    /// * `enable` - 是否启用音频设备
     #[allow(dead_code)]
     pub(crate) fn krun_set_snd_device(ctx_id: u32, enable: bool) -> i32;
 
-    /// Configures a map of rlimits to be set in the guest before starting the isolated binary.
+    /// 配置要在访客中设置的 rlimits 映射
     ///
-    /// ## Arguments
+    /// rlimits（resource limits）用于限制进程可使用的系统资源。
     ///
-    /// * `ctx_id` - The configuration context ID.
-    /// * `c_rlimits` - A **null-terminated** array of string pointers with format
-    ///   "<RESOURCE_NUMBER>=RLIM_CUR:RLIM_MAX" (e.g., "6=1024:1024").
+    /// ## 参数
+    /// * `ctx_id` - 配置上下文 ID
+    /// * `c_rlimits` - **空终止**字符串指针数组，格式为
+    ///   "<RESOURCE_NUMBER>=RLIM_CUR:RLIM_MAX"（如 "6=1024:1024"）
     pub(crate) fn krun_set_rlimits(ctx_id: u32, c_rlimits: *const *const c_char) -> i32;
 
-    /// Sets the SMBIOS OEM strings for the MicroVm.
+    /// 设置 MicroVm 的 SMBIOS OEM 字符串
     ///
-    /// ## Arguments
+    /// SMBIOS OEM 字符串可用于向访客传递自定义信息。
     ///
-    /// * `ctx_id` - The configuration context ID.
-    /// * `c_oem_strings` - An array of string pointers. Must be terminated with an additional NULL
-    ///   pointer.
+    /// ## 参数
+    /// * `ctx_id` - 配置上下文 ID
+    /// * `c_oem_strings` - 字符串指针数组，必须用额外的 NULL 指针终止
     #[allow(dead_code)]
     pub(crate) fn krun_set_smbios_oem_strings(
         ctx_id: u32,
         c_oem_strings: *const *const c_char,
     ) -> i32;
 
-    /// Sets the working directory for the executable to be run inside the MicroVm.
+    /// 设置 MicroVm 内要运行的可执行文件的工作目录
     ///
-    /// ## Arguments
-    ///
-    /// * `ctx_id` - The configuration context ID.
-    /// * `c_workdir_path` - The path to the working directory, relative to the root configured with
-    ///   "krun_set_root".
+    /// ## 参数
+    /// * `ctx_id` - 配置上下文 ID
+    /// * `c_workdir_path` - 工作目录路径，相对于用 "krun_set_root" 配置的根
     pub(crate) fn krun_set_workdir(ctx_id: u32, c_workdir_path: *const c_char) -> i32;
 
-    /// Sets the path to the executable to be run inside the MicroVm, the arguments to be passed to
-    /// the executable, and the environment variables to be configured in the context of the
-    /// executable.
+    /// 设置 MicroVm 内要运行的可执行文件的路径、传递给可执行文件的参数
+    /// 以及要在可执行文件上下文中配置的环境变量
     ///
-    /// ## Arguments
+    /// ## 参数
+    /// * `ctx_id` - 配置上下文 ID
+    /// * `c_exec_path` - 可执行文件路径，相对于用 "krun_set_root" 配置的根
+    /// * `c_argv` - **空终止**字符串指针数组，要作为参数传递
+    /// * `c_envp` - **空终止**字符串指针数组，要注入到可执行文件上下文中的
+    ///   环境变量
     ///
-    /// * `ctx_id` - The configuration context ID.
-    /// * `c_exec_path` - The path to the executable, relative to the root configured with
-    ///   "krun_set_root".
-    /// * `c_argv` - A **null-terminated** array of string pointers to be passed as arguments.
-    /// * `c_envp` - A **null-terminated** array of string pointers to be injected as environment
-    ///   variables into the context of the executable.
-    ///
-    /// ## Note
-    ///
-    /// Passing NULL for `c_envp` will auto-generate an array collecting the the variables currently
-    /// present in the environment.
+    /// ## 注意事项
+    /// 为 `c_envp` 传递 NULL 将自动生成一个数组，收集当前环境中存在的变量。
     pub(crate) fn krun_set_exec(
         ctx_id: u32,
         c_exec_path: *const c_char,
@@ -314,76 +310,72 @@ unsafe extern "C" {
         c_envp: *const *const c_char,
     ) -> i32;
 
-    /// Sets the environment variables to be configured in the context of the executable.
+    /// 设置要在可执行文件上下文中配置的环境变量
     ///
-    /// ## Arguments
+    /// ## 参数
+    /// * `ctx_id` - 配置上下文 ID
+    /// * `c_envp` - **空终止**字符串指针数组，要注入到可执行文件上下文中的
+    ///   环境变量
     ///
-    /// * `ctx_id` - The configuration context ID.
-    /// * `c_envp` - A **null-terminated** array of string pointers to be injected as environment
-    ///   variables into the context of the executable.
-    ///
-    /// ## Note
-    ///
-    /// Passing NULL for `c_envp` will auto-generate an array collecting the the variables currently
-    /// present in the environment.
+    /// ## 注意事项
+    /// 为 `c_envp` 传递 NULL 将自动生成一个数组，收集当前环境中存在的变量。
     #[allow(dead_code)]
     pub(crate) fn krun_set_env(ctx_id: u32, c_envp: *const *const c_char) -> i32;
 
-    /// Sets the filepath to the TEE configuration file for the MicroVm. Only available in
-    /// libkrun-sev.
+    /// 设置 MicroVm 的 TEE 配置文件路径
     ///
-    /// ## Arguments
+    /// 仅适用于 libkrun-sev 版本。TEE（Trusted Execution Environment）
+    /// 用于提供硬件级别的安全隔离。
     ///
-    /// * `ctx_id` - The configuration context ID.
-    /// * `c_filepath` - The filepath to the TEE configuration file.
+    /// ## 参数
+    /// * `ctx_id` - 配置上下文 ID
+    /// * `c_filepath` - TEE 配置文件的路径
     #[allow(dead_code)]
     pub(crate) fn krun_set_tee_config_file(ctx_id: u32, c_filepath: *const c_char) -> i32;
 
-    /// Adds a port-path pairing for guest IPC with a process in the host.
+    /// 添加端口 - 路径配对，用于访客与主机进程进行 IPC
     ///
-    /// ## Arguments
+    /// vsock 是一种用于 VM 和主机之间通信的套接字类型。
     ///
-    /// * `ctx_id` - The configuration context ID.
-    /// * `port` - The port that the guest will connect to for IPC.
-    /// * `c_filepath` - The path of the UNIX socket in the host.
+    /// ## 参数
+    /// * `ctx_id` - 配置上下文 ID
+    /// * `port` - 访客用于 IPC 连接的端口
+    /// * `c_filepath` - 主机上 Unix 套接字的路径
     #[allow(dead_code)]
     pub(crate) fn krun_add_vsock_port(ctx_id: u32, port: u32, c_filepath: *const c_char) -> i32;
 
-    /// Gets the eventfd file descriptor to signal the guest to shut down orderly. This must be
-    /// called before starting the MicroVm with "krun_start_enter". Only available in libkrun-efi.
+    /// 获取用于有序关闭访客的 eventfd 文件描述符
     ///
-    /// ## Arguments
+    /// 必须在用 "krun_start_enter" 启动 MicroVm 之前调用。
+    /// 仅适用于 libkrun-efi 版本。
     ///
-    /// * `ctx_id` - The configuration context ID.
+    /// ## 参数
+    /// * `ctx_id` - 配置上下文 ID
     ///
-    /// ## Returns
-    ///
-    /// Returns the eventfd file descriptor on success or a negative error number on failure.
+    /// ## 返回值
+    /// 成功返回 eventfd 文件描述符，失败返回负的错误码
     #[allow(dead_code)]
     pub(crate) fn krun_get_shutdown_eventfd(ctx_id: u32) -> i32;
 
-    /// Sets the path to the file to write the console output for the MicroVm.
+    /// 设置 MicroVm 控制台输出要写入的文件路径
     ///
-    /// ## Arguments
-    ///
-    /// * `ctx_id` - The configuration context ID.
-    /// * `c_filepath` - The path of the file to write the console output.
+    /// ## 参数
+    /// * `ctx_id` - 配置上下文 ID
+    /// * `c_filepath` - 要写入控制台输出的文件路径
     pub(crate) fn krun_set_console_output(ctx_id: u32, c_filepath: *const c_char) -> i32;
 
-    /// Starts and enters the MicroVm with the configured parameters. The VMM will attempt to take over
-    /// stdin/stdout to manage them on behalf of the process running inside the isolated environment,
-    /// simulating that the latter has direct control of the terminal.
+    /// 使用配置的参数启动并进入 MicroVm
     ///
-    /// This function consumes the configuration pointed by the context ID.
+    /// VMM（Virtual Machine Monitor）将尝试接管 stdin/stdout，
+    /// 代表隔离环境中运行的进程管理它们，模拟后者直接控制终端的行为。
     ///
-    /// ## Arguments
+    /// 此函数会消耗上下文 ID 指向的配置。
     ///
-    /// * `ctx_id` - The configuration context ID.
+    /// ## 参数
+    /// * `ctx_id` - 配置上下文 ID
     ///
-    /// ## Returns
-    ///
-    /// This function only returns if an error happens before starting the MicroVm. Otherwise, the
-    /// VMM assumes it has full control of the process, and will call to exit() once the MicroVm shuts
-    /// down.
+    /// ## 返回值
+    /// 此函数仅在 MicroVm 启动前发生错误时返回。否则，VMM 假定它拥有
+    /// 进程的完全控制权，并将在 MicroVm 关闭时调用 exit()。
     pub(crate) fn krun_start_enter(ctx_id: u32) -> i32;
 }
