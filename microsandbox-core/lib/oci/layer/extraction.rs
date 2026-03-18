@@ -1,3 +1,54 @@
+//! OCI 镜像层提取模块
+//!
+//! 本模块实现了从下载的 tar.gz 文件中提取镜像层的功能。
+//!
+//! ## 层提取的挑战
+//!
+//! OCI 镜像层是叠加的，每个层可能：
+//! 1. 添加新文件
+//! 2. 修改现有文件（覆盖父层的版本）
+//! 3. 删除文件（使用 whiteout 文件标记）
+//!
+//! 提取当前层时，如果某个文件的父目录不存在于当前层，
+//! 需要从父层中复制目录结构和元数据。
+//!
+//! ## 提取流程
+//!
+//! ```text
+//! extract_tar_with_ownership_override()
+//!   │
+//!   ├─> 1. 遍历 tar 中的所有条目
+//!   │     │
+//!   │     ├─ 硬链接 ──> 收集到列表，稍后处理
+//!   │     ├─ 其他类型 ──> 调用 unpack() 提取
+//!   │
+//!   ├─> 2. 对于非 symlink 条目：
+//!   │     ├─ 设置文件权限（目录至少 u+rwx，文件至少 u+rw）
+//!   │     └─ 存储原始 uid/gid/mode 到 xattr
+//!   │
+//!   └─> 3. 处理硬链接列表
+//! ```
+//!
+//! ## 关键概念
+//!
+//! ### xattr（扩展属性）
+//!
+//! 由于 macOS 和 Linux 的用户/组 ID 可能不同，需要保存原始的 uid/gid/mode。
+//! 使用 `user.containers.override_stat` xattr 存储：`"uid:gid:0mode"` 格式。
+//!
+//! ### 硬链接的两阶段处理
+//!
+//! 硬链接必须在目标文件创建之后才能创建，所以：
+//! 1. 第一阶段：收集所有硬链接信息
+//! 2. 第二阶段：创建硬链接并设置 xattr
+//!
+//! ### 父层目录复制
+//!
+//! 如果当前层的文件路径是 `a/b/c/file.txt`，但 `a/b/c/` 目录不在当前层：
+//! 1. 遍历祖先目录（`a`, `a/b`, `a/b/c`）
+//! 2. 在父层中搜索每个祖先目录
+//! 3. 复制找到的目录及其 xattr 和权限
+
 use std::{
     ffi::{CStr, CString},
     io::ErrorKind,
@@ -15,7 +66,40 @@ use tokio_tar::{Archive, Entry};
 
 use crate::{MicrosandboxError, MicrosandboxResult, oci::LayerDependencies};
 
-/// Helper function to get full mode with file type bits
+//--------------------------------------------------------------------------------------------------
+// 辅助函数
+//--------------------------------------------------------------------------------------------------
+
+/// 获取完整的模式位（包含文件类型位）
+///
+/// 在 Unix 系统中，文件权限模式包含：
+/// - 文件类型位（高 4 位）：标识文件是普通文件、目录、symlink 等
+/// - 权限位（低 12 位）：rwxrwxrwx 权限
+///
+/// ## 参数
+///
+/// * `entry_type` - tar 条目中的文件类型
+/// * `permission_bits` - 权限位（不包含文件类型）
+///
+/// ## 返回值
+///
+/// 返回完整的模式值，包含文件类型位和权限位
+///
+/// ## 文件类型常量
+///
+/// | 类型 | libc 常量 | 说明 |
+/// |------|----------|------|
+/// | 普通文件 | `S_IFREG` | 常规文件 |
+/// | 目录 | `S_IFDIR` | 目录文件 |
+/// | 符号链接 | `S_IFLNK` | 软链接 |
+/// | 块设备 | `S_IFBLK` | 块设备文件 |
+/// | 字符设备 | `S_IFCHR` | 字符设备文件 |
+/// | FIFO | `S_IFIFO` | 命名管道 |
+///
+/// ## 为什么需要此函数？
+///
+/// tar 文件头中的模式只包含权限位，不包含文件类型位。
+/// 在设置 xattr 时，需要保存完整的模式以便后续恢复。
 #[allow(clippy::unnecessary_cast)] // libc::S_IF* types differ between platforms (u16 on macOS, u32 on Linux)
 fn get_full_mode(entry_type: &tokio_tar::EntryType, permission_bits: u32) -> u32 {
     let file_type_bits = if entry_type.is_file() {
@@ -37,7 +121,36 @@ fn get_full_mode(entry_type: &tokio_tar::EntryType, permission_bits: u32) -> u32
     file_type_bits | permission_bits
 }
 
-/// Helper function to set xattr with stat information
+/// 设置 xattr 以存储统计信息
+///
+/// 此函数将文件的原始 uid/gid/mode 存储到扩展属性（xattr）中。
+/// 格式：`"uid:gid:0mode"`（例如：`"1000:1000:0755"`）
+///
+/// ## 参数
+///
+/// * `path` - 文件路径
+/// * `xattr_name` - xattr 名称（如 `user.containers.override_stat`）
+/// * `uid` - 用户 ID
+/// * `gid` - 组 ID
+/// * `mode` - 完整模式（包含文件类型位）
+///
+/// ## 跨平台差异
+///
+/// macOS 和 Linux 的 `setxattr` 系统调用签名不同：
+/// - **macOS**: 需要 `position` 参数（通常为 0）
+/// - **Linux**: 需要 `flags` 参数
+///
+/// ## 错误处理
+///
+/// - 如果文件系统不支持 xattr（`ENOTSUP`），记录警告并继续
+/// - 其他错误会返回 `LayerExtraction` 错误
+///
+/// ## 为什么使用 xattr？
+///
+/// 在 macOS 上运行 Linux 容器镜像时：
+/// - macOS 和 Linux 的 uid/gid 映射可能不同
+/// - 需要保存原始的 uid/gid 以便在 VM 中正确恢复
+/// - xattr 提供了不修改文件本身的存储方式
 fn set_stat_xattr(
     path: &Path,
     xattr_name: &CStr,
@@ -93,19 +206,74 @@ fn set_stat_xattr(
     Ok(())
 }
 
-/// Extracts a layer from the downloaded tar.gz file into an extracted directory.
-/// The extracted directory will be named as <layer-name>.extracted
-/// Custom extraction function that modifies file ownership during extraction
+/// 从下载的 tar.gz 文件中提取层到提取目录
+///
+/// 这是层提取的核心函数，支持：
+/// 1. 在提取过程中修改文件所有权
+/// 2. 从父层复制缺失的祖先目录
+/// 3. 保存原始 uid/gid/mode 到 xattr
+/// 4. 两阶段处理硬链接
+///
+/// ## 参数
+///
+/// * `archive` - tar archive（已解压 gzip）
+/// * `extract_dir` - 提取目标目录
+/// * `parent_layers` - 父层依赖关系（用于复制缺失的目录）
+///
+/// ## 返回值
+///
+/// * `Ok(())` - 提取成功
+/// * `Err(MicrosandboxError)` - 提取失败
+///
+/// ## 提取流程
+///
+/// ```text
+/// extract_tar_with_ownership_override()
+///   │
+///   ├─> 1. 初始化 xattr 名称缓存
+///   │
+///   ├─> 2. 创建硬链接收集器
+///   │
+///   ├─> 3. 遍历 tar 中的所有条目
+///   │     │
+///   │     ├─ 获取条目信息（路径、uid、gid、mode、类型）
+///   │     │
+///   │     ├─ 硬链接 ──> 收集到列表，稍后处理
+///   │     │
+///   │     ├─ 其他类型 ──> 调用 unpack() 提取
+///   │           │
+///   │           └─ 如果父目录不存在，从父层复制
+///   │
+///   ├─> 4. 对于非 symlink 条目：
+///   │     ├─ 获取当前元数据
+///   │     ├─ 计算目标权限（目录至少 0o700，文件至少 0o600）
+///   │     ├─ 设置权限（如果需要）
+///   │     └─ 存储 uid/gid/mode 到 xattr
+///   │
+///   └─> 5. 处理硬链接列表（第二阶段）
+/// ```
+///
+/// ## 权限调整规则
+///
+/// | 类型 | 最小权限 | 说明 |
+/// |------|---------|------|
+/// | 目录 | `u+rwx` (0o700) | 所有者可读写执行 |
+/// | 文件 | `u+rw` (0o600) | 所有者可读写 |
+///
+/// ## 为什么跳过 symlink 的权限设置？
+///
+/// 符号链接的权限在大多数系统上是固定的（`lrwxrwxrwx`），
+/// 实际权限由目标文件决定，所以不需要设置。
 pub(crate) async fn extract_tar_with_ownership_override<R: AsyncRead + Unpin>(
     archive: &mut Archive<R>,
     extract_dir: &Path,
     parent_layers: LayerDependencies,
 ) -> MicrosandboxResult<()> {
-    // Cache the xattr name to avoid repeated allocations
+    // 缓存 xattr 名称，避免重复分配
     let xattr_name = CString::new("user.containers.override_stat")
         .map_err(|e| anyhow::anyhow!("Invalid attr name: {e:?}"))?;
 
-    // Store hard links to process after all regular files are extracted
+    // 存储硬链接以便稍后处理（所有常规文件提取完成后）
     let mut hard_links = HardLinkVec::default();
     let mut entries = archive.entries()?;
 
@@ -114,20 +282,20 @@ pub(crate) async fn extract_tar_with_ownership_override<R: AsyncRead + Unpin>(
         let entry_path = entry.path()?.to_path_buf();
         let dst_path = extract_dir.join(&entry_path);
 
-        // Get the original metadata from the tar entry
+        // 从 tar 条目获取原始元数据
         let original_uid = entry.header().uid()?;
         let original_gid = entry.header().gid()?;
         let permission_bits = entry.header().mode()?;
 
-        // Check the entry type
+        // 检查条目类型
         let entry_type = entry.header().entry_type();
         let is_symlink = entry_type.is_symlink();
         let is_hard_link = entry_type.is_hard_link();
 
-        // Calculate the full mode with file type bits
+        // 计算完整的模式（包含文件类型位）
         let original_mode = get_full_mode(&entry_type, permission_bits);
 
-        // Handle hard links separately - collect them for processing after all files are extracted
+        // 单独处理硬链接 - 收集它们以便在所有文件提取完成后处理
         if is_hard_link {
             if let Ok(Some(link_name)) = entry.link_name() {
                 hard_links.push(HardLink {
@@ -141,7 +309,7 @@ pub(crate) async fn extract_tar_with_ownership_override<R: AsyncRead + Unpin>(
             continue;
         }
 
-        // Extract the entry (regular files, directories, symlinks)
+        // 提取条目（普通文件、目录、symlink）
         tracing::debug!(path = %dst_path.display(), "Extracting entry");
         unpack(
             entry,
@@ -154,7 +322,7 @@ pub(crate) async fn extract_tar_with_ownership_override<R: AsyncRead + Unpin>(
 
         tracing::debug!(dst_path = %dst_path.display(), "Done unpacking entry");
 
-        // Skip all operations for symlinks
+        // 跳过 symlink 的所有后续操作
         if is_symlink {
             tracing::trace!(
                 dst_path = %dst_path.display(),
@@ -166,29 +334,29 @@ pub(crate) async fn extract_tar_with_ownership_override<R: AsyncRead + Unpin>(
             continue;
         }
 
-        // For regular files and directories, handle permissions and xattrs
+        // 对于普通文件和目录，处理权限和 xattr
         let metadata = std::fs::metadata(&dst_path)?;
         let is_dir = metadata.is_dir();
         let current_mode = metadata.permissions().mode();
-        let current_permission_bits = current_mode & 0o7777; // Extract only permission bits
+        let current_permission_bits = current_mode & 0o7777; // 仅提取权限位
 
-        // Calculate the final desired permissions
+        // 计算最终期望的权限
         let desired_permission_bits = if is_dir {
-            // For directories, ensure at least u+rwx (0o700)
+            // 对于目录，确保至少 u+rwx (0o700)
             current_permission_bits | 0o700
         } else {
-            // For files, ensure at least u+rw (0o600)
+            // 对于文件，确保至少 u+rw (0o600)
             current_permission_bits | 0o600
         };
 
-        // If we need to modify permissions, do it once
+        // 如果需要修改权限，执行一次设置操作
         if current_permission_bits != desired_permission_bits {
             let mut permissions = metadata.permissions();
             permissions.set_mode(desired_permission_bits);
             std::fs::set_permissions(&dst_path, permissions)?;
         }
 
-        // Store original uid/gid/mode in xattrs
+        // 将原始 uid/gid/mode 存储到 xattr
         set_stat_xattr(
             &dst_path,
             &xattr_name,
@@ -206,19 +374,85 @@ pub(crate) async fn extract_tar_with_ownership_override<R: AsyncRead + Unpin>(
         );
     }
 
+    // 第二阶段：处理硬链接
     hard_links.extract(&xattr_name).await?;
     Ok(())
 }
 
-/// Unpacks a tar entry into a destination path, copying ancestor directories from parent layers if needed
+/// 将 tar 条目解压到目标路径
 ///
-/// ## Arguments
+/// 此函数负责处理 tar 条目的实际解压。
+/// 如果条目的父目录不存在，会从父层中复制祖先目录。
 ///
-/// * `entry` - The tar entry to unpack
-/// * `entry_path` - The path of the tar entry
-/// * `dst_path` - The path to unpack the tar entry to
-/// * `extract_dir` - The directory to extract the tar entry to
-/// * `parent_layers` - The parent layers to copy ancestor directories from
+/// ## 参数
+///
+/// * `entry` - 要解压的 tar 条目
+/// * `entry_path` - tar 条目中的路径
+/// * `dst_path` - 解压目标路径
+/// * `extract_dir` - 提取目录根路径
+/// * `parent_layers` - 父层依赖关系
+///
+/// ## 返回值
+///
+/// * `Ok(())` - 解压成功
+/// * `Err(MicrosandboxError)` - 解压失败
+///
+/// ## 处理流程
+///
+/// ```text
+/// unpack()
+///   │
+///   ├─> 1. 尝试直接解压条目
+///   │     │
+///   │     ├─ 成功 ──> 返回 Ok(())
+///   │     │
+///   │     └─ 失败 ──> 检查错误类型
+///   │           │
+///   │           ├─ NotFound ──> 继续步骤 2
+///   │           │
+///   │           └─ 其他错误 ──> 返回错误
+///   │
+///   ├─> 2. 获取条目的父目录
+///   │
+///   ├─> 3. 遍历所有祖先目录（从根到父目录）
+///   │     │
+///   │     ├─ 检查是否是 `..`（父目录引用）
+///   │     │   │
+///   │     │   ├─ 是 ──> 跳过（防止目录遍历攻击）
+///   │     │   │
+///   │     │   └─ 否 ──> 继续在父层中搜索
+///   │     │
+///   │     ├─ 在父层中搜索祖先目录
+///   │     │   │
+///   │     │   ├─ 找到 ──> 复制目录及其属性
+///   │     │   │
+///   │     │   └─ 未找到 ──> 返回错误
+///   │     │
+///   │     └─ 继续下一个祖先目录
+///   │
+///   └─> 4. 重试解压条目
+/// ```
+///
+/// ## 安全考虑
+///
+/// ### 防止目录遍历攻击
+///
+/// 如果 tar 条目包含 `../` 路径组件：
+/// - 检测到 `Component::ParentDir` 时立即停止
+/// - 记录调试日志并中断处理
+///
+/// ### 为什么需要复制父层的目录？
+///
+/// OCI 镜像层是差异化的：
+/// - 基础层可能包含 `/etc/nginx/` 目录
+/// - 顶层只包含 `/etc/nginx/nginx.conf` 文件
+/// - 提取顶层时，需要基础层的 `/etc/nginx/` 目录存在
+///
+/// ## 为什么要复制目录属性？
+///
+/// 目录的权限和 xattr 可能包含重要信息：
+/// - 权限位：决定谁可以访问该目录
+/// - xattr：存储原始的 uid/gid/mode（用于在 VM 中恢复）
 async fn unpack<R: AsyncRead + Unpin>(
     mut entry: Entry<Archive<R>>,
     entry_path: &Path,
@@ -226,26 +460,31 @@ async fn unpack<R: AsyncRead + Unpin>(
     extract_dir: &Path,
     parent_layers: LayerDependencies,
 ) -> MicrosandboxResult<()> {
+    // 尝试直接解压条目
     let Err(err) = entry.unpack(&dst_path).await else {
         tracing::debug!(path = %dst_path.display(), "Done unpacking entry");
         return Ok(());
     };
 
+    // 如果不是 NotFound 错误，直接返回
     if !matches!(err.kind(), ErrorKind::NotFound) {
         return Err(err.into());
     }
 
-    // Copy every ancestor directory from the parent layers, excluding the root
-    // directory component i.e. "."
+    // 获取条目的父目录路径
     let parent = entry_path.parent().expect("tar entry to have a parent");
+    // 获取所有祖先目录（从深到浅：[a/b/c, a/b, a, .]）
     let ancestors = parent.ancestors().collect::<Vec<_>>();
+
+    // 逆序遍历祖先目录（从浅到深：[., a, a/b, a/b/c]），跳过根目录 `.`
     for ancestor in ancestors.into_iter().rev().skip(1) {
-        // To avoid directory traversal attacks, skip relative parent directories entries
+        // 防止目录遍历攻击：跳过 `..` 组件
         if ancestor.components().next() == Some(Component::ParentDir) {
             tracing::debug!(ancestor = %ancestor.display(), "Skipping parent directory");
             break;
         }
 
+        // 在父层中搜索祖先目录
         let (digest, parent_path) = parent_layers.find_dir(ancestor).await?.ok_or_else(|| {
             anyhow!(
                 "ancestor directory not found in any parent layer: {}",
@@ -261,11 +500,12 @@ async fn unpack<R: AsyncRead + Unpin>(
             "Found dir in a parent layer. Proceeding to copy"
         );
 
+        // 创建目录并复制属性
         create_and_copy_dir_attr(&parent_path, &dest_dir).await?;
         tracing::debug!("Copied parent directory for: {}", entry_path.display());
     }
 
-    // Try to unpack the entry again after creating the ancestor directories
+    // 重试解压条目
     if let Err(err) = entry.unpack(&dst_path).await {
         return Err(MicrosandboxError::LayerExtraction(format!(
             "layer extraction failed after retry: {err}",
@@ -275,12 +515,54 @@ async fn unpack<R: AsyncRead + Unpin>(
     Ok(())
 }
 
-/// Creates a directory and copies over permissions and xattrs from the template directory
+/// 创建目录并复制模板目录的属性
 ///
-/// ## Arguments
+/// 此函数用于从父层复制目录时，保持权限和 xattr 不变。
 ///
-/// * `template_dir` - The template directory to copy permissions and xattrs from
-/// * `dest_dir` - The destination directory to create and copy permissions and xattrs to
+/// ## 参数
+///
+/// * `template_dir` - 模板目录（源目录）
+/// * `dest_dir` - 目标目录（要创建的目录）
+///
+/// ## 返回值
+///
+/// * `Ok(())` - 创建成功
+/// * `Err(MicrosandboxError)` - 创建失败
+///
+/// ## 处理流程
+///
+/// ```text
+/// create_and_copy_dir_attr()
+///   │
+///   ├─> 1. 检查目标目录是否已存在
+///   │     │
+///   │     ├─ 存在 ──> 记录调试日志，直接返回
+///   │     │
+///   │     └─ 不存在 ──> 继续步骤 2
+///   │
+///   ├─> 2. 验证源目录存在且是目录
+///   │
+///   ├─> 3. 获取源目录的权限模式
+///   │
+///   ├─> 4. 创建新目录（使用相同权限）
+///   │
+///   └─> 5. 复制所有 xattr
+///   │     │
+///   │     ├─ 遍历源目录的所有 xattr
+///   │     ├─ 读取 xattr 值
+///   │     └─ 设置到目标目录（失败则记录警告）
+///   │
+///   └─> 返回 Ok(())
+/// ```
+///
+/// ## 为什么失败只记录警告？
+///
+/// xattr 设置失败可能有多种原因：
+/// - 文件系统不支持 xattr
+/// - xattr 名称在目标系统上无效
+/// - 权限不足
+///
+/// 这些通常不是致命错误，所以只记录警告并继续。
 async fn create_and_copy_dir_attr(template_dir: &Path, dest_dir: &Path) -> MicrosandboxResult<()> {
     if dest_dir.exists() {
         tracing::debug!(dest_dir = %dest_dir.display(), "Destination directory already exists");
@@ -294,7 +576,7 @@ async fn create_and_copy_dir_attr(template_dir: &Path, dest_dir: &Path) -> Micro
         )));
     }
 
-    // Create new directory, and copy over permissions and xattrs from template directory
+    // 创建新目录，并从模板目录复制权限和 xattr
     let mode = fs::metadata(&template_dir).await?.permissions().mode();
     DirBuilder::new().mode(mode).create(&dest_dir).await?;
     if let Ok(xattrs) = xattr::list(template_dir) {
@@ -310,7 +592,21 @@ async fn create_and_copy_dir_attr(template_dir: &Path, dest_dir: &Path) -> Micro
     Ok(())
 }
 
-// Structure to store hard link information
+//--------------------------------------------------------------------------------------------------
+// 硬链接处理
+//--------------------------------------------------------------------------------------------------
+
+/// 硬链接信息结构体
+///
+/// 用于存储硬链接的元数据，以便在所有文件提取完成后处理。
+///
+/// ## 字段说明
+///
+/// - `link_path`: 硬链接的路径
+/// - `target_path`: 硬链接指向的目标路径
+/// - `uid`: 原始用户 ID
+/// - `gid`: 原始组 ID
+/// - `mode`: 完整模式（包含文件类型位）
 struct HardLink {
     link_path: PathBuf,
     target_path: PathBuf,
@@ -319,6 +615,20 @@ struct HardLink {
     mode: u32,
 }
 
+/// 硬链接收集器
+///
+/// 用于收集所有硬链接条目，以便第二阶段统一处理。
+///
+/// ## 为什么需要两阶段处理？
+///
+/// 硬链接的目标文件必须先存在，才能创建硬链接。
+/// 但 tar 文件中条目的顺序是不确定的：
+/// - 硬链接条目可能在目标文件之前出现
+/// - 目标文件可能来自父层
+///
+/// 解决方案：
+/// 1. 第一阶段：收集所有硬链接信息
+/// 2. 第二阶段：在所有常规文件提取完成后创建硬链接
 #[derive(Default)]
 struct HardLinkVec {
     hard_links: Vec<HardLink>,
@@ -331,18 +641,44 @@ impl From<Vec<HardLink>> for HardLinkVec {
 }
 
 impl HardLinkVec {
+    /// 添加一个硬链接信息
     pub fn push(&mut self, link: HardLink) {
         self.hard_links.push(link);
     }
 
+    /// 提取所有硬链接（第二阶段）
+    ///
+    /// 此方法会：
+    /// 1. 遍历所有收集的硬链接
+    /// 2. 创建硬链接
+    /// 3. 设置权限（至少 u+rw）
+    /// 4. 存储 uid/gid/mode 到 xattr
+    ///
+    /// ## 参数
+    ///
+    /// * `xattr_name` - xattr 名称
+    ///
+    /// ## 返回值
+    ///
+    /// * `Ok(())` - 所有硬链接创建成功
+    /// * `Err(MicrosandboxError)` - 创建失败
+    ///
+    /// ## 错误处理策略
+    ///
+    /// 硬链接创建失败只记录警告，不中断整个提取过程：
+    /// - 目标文件可能不存在
+    /// - 文件系统可能不支持硬链接
+    /// - xattr 设置可能失败
+    ///
+    /// 这些通常是可容忍的错误。
     async fn extract(&self, xattr_name: &CStr) -> MicrosandboxResult<()> {
-        // Second pass: process hard links after all regular files are extracted
+        // 第二阶段：处理所有硬链接
         for link_info in &self.hard_links {
-            // Create the hard link
+            // 创建硬链接
             match std::fs::hard_link(&link_info.target_path, &link_info.link_path) {
                 Ok(_) => {
-                    // Hard link created successfully, now handle xattrs
-                    // Get metadata and ensure proper permissions
+                    // 硬链接创建成功，处理元数据
+                    // 获取元数据并设置正确的权限
                     let metadata = match std::fs::metadata(&link_info.link_path) {
                         Ok(m) => m,
                         Err(e) => {
@@ -356,10 +692,10 @@ impl HardLinkVec {
                     };
 
                     let current_mode = metadata.permissions().mode();
-                    let current_permission_bits = current_mode & 0o7777; // Extract only permission bits
-                    let desired_permission_bits = current_permission_bits | 0o600; // Ensure at least u+rw
+                    let current_permission_bits = current_mode & 0o7777; // 仅提取权限位
+                    let desired_permission_bits = current_permission_bits | 0o600; // 确保至少 u+rw
 
-                    // Set permissions if needed
+                    // 设置权限（如果需要）
                     if current_permission_bits != desired_permission_bits {
                         let mut permissions = metadata.permissions();
                         permissions.set_mode(desired_permission_bits);
@@ -374,7 +710,7 @@ impl HardLinkVec {
                         }
                     }
 
-                    // Store original uid/gid/mode in xattrs
+                    // 将原始 uid/gid/mode 存储到 xattr
                     if let Err(e) = set_stat_xattr(
                         &link_info.link_path,
                         xattr_name,
@@ -382,7 +718,7 @@ impl HardLinkVec {
                         link_info.gid,
                         link_info.mode,
                     ) {
-                        // For hard links, we just warn on xattr errors instead of failing
+                        // 对于硬链接，xattr 错误只记录警告而不是失败
                         tracing::warn!(
                             "Failed to set xattr on hard link {}: {}",
                             link_info.link_path.display(),
