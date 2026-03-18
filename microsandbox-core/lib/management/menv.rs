@@ -1,9 +1,98 @@
-//! Microsandbox environment management.
+//! Microsandbox 环境管理模块。
 //!
-//! This module handles the initialization and management of Microsandbox environments.
-//! A Microsandbox environment (menv) is a directory structure that contains all the
-//! necessary components for running sandboxes, including configuration files,
-//! databases, and log directories.
+//! # 概述
+//!
+//! 本模块负责 Microsandbox 环境（menv）的初始化和管理工作。
+//!
+//! ## 什么是 Microsandbox 环境？
+//!
+//! Microsandbox 环境（简称 `.menv`）是一个项目目录中的特殊子目录，它包含
+//! 运行沙箱所需的所有组件：
+//!
+//! ```text
+//! project/
+//! ├── .menv/                    # Microsandbox 环境目录
+//! │   ├── config.yaml           # Microsandbox 配置文件
+//! │   ├── sandbox.db            # 沙箱数据库（SQLite）
+//! │   ├── log/                  # 日志目录
+//! │   │   └── <config>/<sandbox>.log
+//! │   ├── rw/                   # 可写层目录（用于 overlayfs）
+//! │   │   └── <config>/<sandbox>/
+//! │   └── patch/                # 补丁目录（存放脚本等）
+//! │       └── <config>/<sandbox>/
+//! ├── .gitignore                # Git 忽略文件（自动更新）
+//! └── sandbox.yaml              # 沙箱配置文件
+//! ```
+//!
+//! # 主要功能
+//!
+//! | 函数 | 功能描述 |
+//! |------|----------|
+//! | `initialize()` | 在项目目录中初始化 `.menv` 环境 |
+//! | `clean()` | 清理沙箱环境（可选择清理整个项目或单个沙箱） |
+//! | `show_log()` | 显示沙箱日志（支持 follow 模式） |
+//! | `show_list()` | 显示沙箱列表（CLI 功能） |
+//! | `show_list_projects()` | 显示多项目沙箱列表（服务器模式） |
+//!
+//! # 架构设计
+//!
+//! ## 环境初始化流程
+//!
+//! ```text
+//! initialize()
+//!     │
+//!     ├── 1. 创建 .menv 目录
+//!     │
+//!     ├── 2. 创建必需的子目录和文件
+//!     │   ├── log/           - 日志目录
+//!     │   ├── rw/            - 可写层目录
+//!     │   └── sandbox.db     - SQLite 数据库
+//!     │
+//!     ├── 3. 创建默认配置文件（如果不存在）
+//!     │
+//!     └── 4. 更新 .gitignore（添加 .menv 条目）
+//! ```
+//!
+//! ## 清理流程
+//!
+//! ```text
+//! clean(sandbox_name)
+//!     │
+//!     ├── sandbox_name == None?
+//!     │   │
+//!     │   ├── Yes: 删除整个 .menv 目录
+//!     │   │
+//!     │   └── No: 只清理指定沙箱
+//!     │       ├── 删除 rw/<config>/<sandbox>/ 目录
+//!     │       ├── 删除 patch/<config>/<sandbox>/ 目录
+//!     │       ├── 删除 log/<config>/<sandbox>.log 文件
+//!     │       └── 从数据库删除沙箱记录
+//! ```
+//!
+//! # 使用示例
+//!
+//! ```no_run
+//! use microsandbox_core::management::menv;
+//! use std::path::PathBuf;
+//!
+//! # async fn example() -> anyhow::Result<()> {
+//! // 在当前目录初始化环境
+//! menv::initialize(None).await?;
+//!
+//! // 在指定目录初始化环境
+//! menv::initialize(Some("my_project".into())).await?;
+//!
+//! // 清理整个项目环境
+//! menv::clean(None, None, None, false).await?;
+//!
+//! // 清理指定沙箱
+//! menv::clean(None, None, Some("dev"), false).await?;
+//!
+//! // 查看沙箱日志
+//! menv::show_log(None::<&std::path::Path>, None, "dev", false, Some(100)).await?;
+//! # Ok(())
+//! # }
+//! ```
 
 use crate::{MicrosandboxError, MicrosandboxResult};
 
@@ -19,44 +108,83 @@ use tokio::{fs, io::AsyncWriteExt};
 use super::{config, db};
 
 //--------------------------------------------------------------------------------------------------
-// Constants
+// 常量定义
 //--------------------------------------------------------------------------------------------------
 
+/// [CLI 功能] 移除 .menv 目录的提示信息
 #[cfg(feature = "cli")]
 const REMOVE_MENV_DIR_MSG: &str = "Remove .menv directory";
+
+/// [CLI 功能] 初始化 .menv 目录的提示信息
 #[cfg(feature = "cli")]
 const INITIALIZE_MENV_DIR_MSG: &str = "Initialize .menv directory";
+
+/// [CLI 功能] 创建默认配置文件的提示信息
 #[cfg(feature = "cli")]
 const CREATE_DEFAULT_CONFIG_MSG: &str = "Create default config file";
+
+/// [CLI 功能] 清理沙箱的提示信息
 #[cfg(feature = "cli")]
 const CLEAN_SANDBOX_MSG: &str = "Clean sandbox";
 
 //--------------------------------------------------------------------------------------------------
-// Functions
+// 公开函数
 //--------------------------------------------------------------------------------------------------
 
-/// Initialize a new microsandbox environment at the specified path
+/// 在指定路径初始化新的 Microsandbox 环境。
 ///
-/// ## Arguments
-/// * `project_dir` - Optional path where the microsandbox environment will be initialized. If None, uses current directory
+/// # 功能说明
 ///
-/// ## Example
+/// 此函数会在项目目录中创建 `.menv` 环境，包括：
+///
+/// 1. **创建 `.menv` 目录**：如果不存在则创建
+/// 2. **创建必需的子目录**：
+///    - `log/` - 存放沙箱运行日志
+///    - `rw/` - overlayfs 的可写层
+/// 3. **初始化数据库**：创建 `sandbox.db` SQLite 数据库
+/// 4. **创建默认配置文件**：如果 `sandbox.yaml` 不存在则创建
+/// 5. **更新 `.gitignore`**：确保 `.menv/` 被 Git 忽略
+///
+/// # 参数
+///
+/// * `project_dir` - 可选的项目目录路径
+///   - `None`: 使用当前目录
+///   - `Some(path)`: 使用指定路径
+///
+/// # 目录结构
+///
+/// 初始化后的目录结构：
+///
+/// ```text
+/// project/
+/// ├── .menv/
+/// │   ├── sandbox.db          # 沙箱数据库
+/// │   ├── log/                # 日志目录
+/// │   └── rw/                 # 可写层目录
+/// ├── sandbox.yaml            # 默认配置文件（如不存在）
+/// └── .gitignore              # 已添加 .menv/ 条目
+/// ```
+///
+/// # 示例
+///
 /// ```no_run
 /// use microsandbox_core::management::menv;
 ///
 /// # async fn example() -> anyhow::Result<()> {
-/// // Initialize in current directory
+/// // 在当前目录初始化
 /// menv::initialize(None).await?;
 ///
-/// // Initialize in specific directory
+/// // 在指定目录初始化
 /// menv::initialize(Some("my_project".into())).await?;
 /// # Ok(())
 /// # }
 /// ```
 pub async fn initialize(project_dir: Option<PathBuf>) -> MicrosandboxResult<()> {
-    // Get the target path, defaulting to current directory if none specified
+    // 获取目标路径，如果未指定则默认为当前目录
     let project_dir = project_dir.unwrap_or_else(|| PathBuf::from("."));
     let menv_path = project_dir.join(MICROSANDBOX_ENV_DIR);
+
+    // [CLI 功能] 创建进度提示（如果 .menv 目录不存在）
     #[cfg(feature = "cli")]
     let initialize_menv_dir_sp = if !menv_path.exists() {
         Some(term::create_spinner(
@@ -68,21 +196,24 @@ pub async fn initialize(project_dir: Option<PathBuf>) -> MicrosandboxResult<()> 
         None
     };
 
+    // 创建 .menv 目录（如果不存在）
+    // create_dir_all 是幂等的：目录已存在时不会报错
     fs::create_dir_all(&menv_path).await?;
 
-    // Create the required files for the microsandbox environment
+    // 创建 Microsandbox 环境所需的文件和子目录
     ensure_menv_files(&menv_path).await?;
 
-    // Create default config file if it doesn't exist
+    // 创建默认配置文件（如果不存在）
     create_default_config(&project_dir).await?;
     tracing::info!(
         "config file at {}",
         project_dir.join(MICROSANDBOX_CONFIG_FILENAME).display()
     );
 
-    // Update .gitignore to include .menv directory
+    // 更新 .gitignore，确保包含 .menv 目录
     update_gitignore(&project_dir).await?;
 
+    // [CLI 功能] 完成进度提示
     #[cfg(feature = "cli")]
     if let Some(sp) = initialize_menv_dir_sp {
         sp.finish();
@@ -91,31 +222,77 @@ pub async fn initialize(project_dir: Option<PathBuf>) -> MicrosandboxResult<()> 
     Ok(())
 }
 
-/// Clean up the microsandbox environment for a project or a specific sandbox
+/// 清理项目或指定沙箱的 Microsandbox 环境。
 ///
-/// This function can either:
-/// 1. Remove the entire .menv directory and all its contents (when sandbox_name is None)
-/// 2. Remove just a specific sandbox's data (when sandbox_name is provided)
+/// # 功能说明
 ///
-/// ## Arguments
-/// * `project_dir` - Optional path where the microsandbox environment should be cleaned.
-///   If None, uses current directory
-/// * `config_file` - Optional path to the Microsandbox config file. If None, uses default filename
-/// * `sandbox_name` - Optional name of the sandbox to clean. If None, cleans entire project
-/// * `force` - Whether to force cleaning even if the sandbox exists in config or config file exists
+/// 此函数有两种工作模式：
 ///
-/// ## Example
+/// ## 模式 1：清理整个项目（`sandbox_name = None`）
+///
+/// 删除整个 `.menv` 目录及其所有内容：
+/// - 所有沙箱的数据
+/// - 所有日志文件
+/// - 数据库文件
+///
+/// **注意**：如果配置文件存在且 `force = false`，则不会执行清理，
+/// 这是为了防止意外删除正在使用的环境。
+///
+/// ## 模式 2：清理指定沙箱（`sandbox_name = Some(name)`）
+///
+/// 只删除指定沙箱的相关数据：
+/// - `rw/<config>/<sandbox>/` - 沙箱的可写层目录
+/// - `patch/<config>/<sandbox>/` - 沙箱的补丁目录
+/// - `log/<config>/<sandbox>.log` - 沙箱日志文件
+/// - 数据库中的沙箱记录
+///
+/// **注意**：如果沙箱存在于配置文件中且 `force = false`，则不会执行清理。
+///
+/// # 参数
+///
+/// * `project_dir` - 可选的项目目录路径
+///   - `None`: 使用当前目录
+///   - `Some(path)`: 使用指定路径
+/// * `config_file` - 可选的配置文件路径
+///   - `None`: 使用默认文件名 `sandbox.yaml`
+///   - `Some(path)`: 使用指定文件名
+/// * `sandbox_name` - 可选的沙箱名称
+///   - `None`: 清理整个项目
+///   - `Some(name)`: 只清理指定沙箱
+/// * `force` - 是否强制清理
+///   - `false`: 如果配置文件或沙箱存在，拒绝清理
+///   - `true`: 忽略存在性检查，强制清理
+///
+/// # 目录层级结构
+///
+/// Microsandbox 支持多配置文件，因此使用层级结构：
+///
+/// ```text
+/// .menv/
+/// ├── rw/
+/// │   └── sandbox.yaml/       # 配置文件名作为目录
+/// │       └── dev/            # 沙箱名
+/// ├── patch/
+/// │   └── sandbox.yaml/
+/// │       └── dev/
+/// └── log/
+///     └── sandbox.yaml/
+///         └── dev.log
+/// ```
+///
+/// # 示例
+///
 /// ```no_run
 /// use microsandbox_core::management::menv;
 ///
 /// # async fn example() -> anyhow::Result<()> {
-/// // Clean entire project in current directory
+/// // 清理当前目录的整个项目环境
 /// menv::clean(None, None, None, false).await?;
 ///
-/// // Clean specific sandbox in current directory
+/// // 清理当前目录的指定沙箱
 /// menv::clean(None, None, Some("dev"), false).await?;
 ///
-/// // Clean specific sandbox with custom config file, forcing cleanup
+/// // 使用自定义配置文件，强制清理
 /// menv::clean(None, Some("custom.yaml"), Some("dev"), true).await?;
 /// # Ok(())
 /// # }
@@ -126,20 +303,20 @@ pub async fn clean(
     sandbox_name: Option<&str>,
     force: bool,
 ) -> MicrosandboxResult<()> {
-    // Get the target path, defaulting to current directory if none specified
+    // 获取目标路径，如果未指定则默认为当前目录
     let project_dir = project_dir.unwrap_or_else(|| PathBuf::from("."));
     let menv_path = project_dir.join(MICROSANDBOX_ENV_DIR);
 
-    // Try to load the configuration if the file exists
+    // 尝试加载配置文件（如果存在）
     let config_result =
         crate::management::config::load_config(Some(&project_dir), config_file).await;
 
-    // If no sandbox name is provided, clean the entire project
+    // 如果未指定沙箱名称，清理整个项目
     if sandbox_name.is_none() {
         #[cfg(feature = "cli")]
         let remove_menv_dir_sp = term::create_spinner(REMOVE_MENV_DIR_MSG.to_string(), None, None);
 
-        // If the config file exists and force is false, don't clean
+        // 如果配置文件存在且未强制，拒绝清理
         if config_result.is_ok() && !force {
             #[cfg(feature = "cli")]
             term::finish_with_error(&remove_menv_dir_sp);
@@ -156,9 +333,9 @@ pub async fn clean(
             return Ok(());
         }
 
-        // Check if .menv directory exists
+        // 检查 .menv 目录是否存在
         if menv_path.exists() {
-            // Remove the .menv directory and all its contents
+            // 删除 .menv 目录及其所有内容
             fs::remove_dir_all(&menv_path).await?;
             tracing::info!(
                 "Removed microsandbox environment at {}",
@@ -177,7 +354,7 @@ pub async fn clean(
         return Ok(());
     }
 
-    // At this point we know we're cleaning a specific sandbox
+    // 执行到这里说明要清理指定的沙箱
     let sandbox_name = sandbox_name.unwrap();
     let config_file = config_file.unwrap_or(MICROSANDBOX_CONFIG_FILENAME);
 
@@ -188,7 +365,7 @@ pub async fn clean(
         None,
     );
 
-    // If the sandbox exists in the config and force is false, don't clean
+    // 如果沙箱存在于配置中且未强制，拒绝清理
     if let Ok((config, _, _)) = config_result
         && config.get_sandbox(sandbox_name).is_some()
         && !force
@@ -210,14 +387,15 @@ pub async fn clean(
         return Ok(());
     }
 
-    // Get sandbox scoped name (config_file/sandbox_name)
+    // 获取沙箱的限定名称（配置文件名/沙箱名）
+    // 例如："sandbox.yaml/dev"
     let scoped_name = PathBuf::from(config_file).join(sandbox_name);
 
-    // Clean up sandbox-specific directories
+    // 清理沙箱特定的目录
     let rw_path = menv_path.join(RW_SUBDIR).join(&scoped_name);
     let patch_path = menv_path.join(PATCH_SUBDIR).join(&scoped_name);
 
-    // Remove sandbox directories if they exist
+    // 删除沙箱目录（如果存在）
     if rw_path.exists() {
         fs::remove_dir_all(&rw_path).await?;
         tracing::info!("Removed sandbox RW directory at {}", rw_path.display());
@@ -231,7 +409,7 @@ pub async fn clean(
         );
     }
 
-    // Remove log file if it exists
+    // 删除日志文件（如果存在）
     let log_file = menv_path
         .join(LOG_SUBDIR)
         .join(config_file)
@@ -242,7 +420,7 @@ pub async fn clean(
         tracing::info!("Removed sandbox log file at {}", log_file.display());
     }
 
-    // Remove sandbox from database
+    // 从数据库删除沙箱记录
     let db_path = menv_path.join(SANDBOX_DB_FILENAME);
     if db_path.exists() {
         let pool = db::get_or_create_pool(&db_path, &db::SANDBOX_DB_MIGRATOR).await?;
@@ -256,33 +434,63 @@ pub async fn clean(
     Ok(())
 }
 
-/// Show logs for a sandbox
+/// 显示沙箱的日志。
 ///
-/// This function can show logs for a sandbox in either follow mode or regular mode.
-/// In follow mode, it uses `tail -f` to continuously show new log entries.
-/// In regular mode, it shows either all logs or the last N lines.
+/// # 功能说明
 ///
-/// ## Arguments
-/// * `project_dir` - Optional path where the microsandbox environment is located.
-///   If None, uses current directory
-/// * `config_file` - Optional path to the Microsandbox config file. If None, uses default filename
-/// * `sandbox_name` - Name of the sandbox to show logs for
-/// * `follow` - Whether to follow the log file (tail -f mode)
-/// * `tail` - Optional number of lines to show from the end
+/// 此函数支持两种日志查看模式：
 ///
-/// ## Example
+/// ## 模式 1：Follow 模式（`follow = true`）
+///
+/// - 使用 `tail -f` 命令实时跟踪日志文件
+/// - 适合监控正在运行的沙箱
+/// - 需要系统安装 `tail` 命令
+///
+/// ## 模式 2：普通模式（`follow = false`）
+///
+/// - 读取并显示日志文件内容
+/// - 可选择显示全部日志或最后 N 行
+/// - 适合查看历史日志
+///
+/// # 参数
+///
+/// * `project_dir` - 可选的项目目录路径
+///   - `None`: 使用当前目录
+///   - `Some(path)`: 使用指定路径
+/// * `config_file` - 可选的配置文件路径
+///   - `None`: 使用默认文件名
+///   - `Some(path)`: 使用指定文件名
+/// * `sandbox_name` - 要查看日志的沙箱名称
+/// * `follow` - 是否使用 follow 模式（类似 `tail -f`）
+/// * `tail` - 可选的行数限制
+///   - `None`: 显示全部日志
+///   - `Some(n)`: 显示最后 n 行
+///
+/// # 日志文件路径
+///
+/// 日志文件遵循层级结构：
+/// `<project_dir>/.menv/log/<config>/<sandbox>.log`
+///
+/// # 错误处理
+///
+/// - 如果 `follow = true` 但系统没有 `tail` 命令，返回 `CommandNotFound` 错误
+/// - 如果日志文件不存在，返回 `LogNotFound` 错误
+/// - 如果 `tail -f` 进程异常退出，返回 `ProcessWaitError` 错误
+///
+/// # 示例
+///
 /// ```no_run
 /// use microsandbox_core::management::menv;
 /// use std::path::Path;
 ///
 /// # async fn example() -> anyhow::Result<()> {
-/// // Show all logs for a sandbox
+/// // 显示沙箱的全部日志
 /// menv::show_log(None::<&Path>, None, "my-sandbox", false, None).await?;
 ///
-/// // Show last 100 lines of logs
+/// // 显示最后 100 行日志
 /// menv::show_log(None::<&Path>, None, "my-sandbox", false, Some(100)).await?;
 ///
-/// // Follow logs in real-time
+/// // 实时跟踪日志（follow 模式）
 /// menv::show_log(None::<&Path>, None, "my-sandbox", true, None).await?;
 /// # Ok(())
 /// # }
@@ -294,7 +502,7 @@ pub async fn show_log(
     follow: bool,
     tail: Option<usize>,
 ) -> MicrosandboxResult<()> {
-    // Check if tail command exists when follow mode is requested
+    // 如果请求 follow 模式，检查 tail 命令是否存在
     if follow {
         let tail_exists = which::which("tail").is_ok();
         if !tail_exists {
@@ -305,18 +513,19 @@ pub async fn show_log(
         }
     }
 
-    // Load the configuration to get canonical paths
+    // 加载配置以获取规范路径
     let (_, canonical_project_dir, config_file) =
         config::load_config(project_dir.as_ref().map(|p| p.as_ref()), config_file).await?;
 
-    // Construct log file path using the hierarchical structure: <project_dir>/.menv/log/<config>/<sandbox>.log
+    // 构建日志文件路径：
+    // <project_dir>/.menv/log/<config>/<sandbox>.log
     let log_path = canonical_project_dir
         .join(MICROSANDBOX_ENV_DIR)
         .join(LOG_SUBDIR)
         .join(&config_file)
         .join(format!("{}.log", sandbox_name));
 
-    // Check if log file exists
+    // 检查日志文件是否存在
     if !log_path.exists() {
         return Err(MicrosandboxError::LogNotFound(format!(
             "Log file not found at {}",
@@ -325,7 +534,7 @@ pub async fn show_log(
     }
 
     if follow {
-        // For follow mode, use tokio::process::Command to run `tail -f`
+        // Follow 模式：使用 tokio::process::Command 运行 `tail -f`
         let mut child = tokio::process::Command::new("tail")
             .arg("-f")
             .arg(&log_path)
@@ -333,7 +542,7 @@ pub async fn show_log(
             .stderr(std::process::Stdio::inherit())
             .spawn()?;
 
-        // Wait for the tail process
+        // 等待 tail 进程结束
         let status = child.wait().await?;
         if !status.success() {
             return Err(MicrosandboxError::ProcessWaitError(format!(
@@ -342,13 +551,13 @@ pub async fn show_log(
             )));
         }
     } else {
-        // Read the file contents
+        // 普通模式：读取文件内容
         let contents = tokio::fs::read_to_string(&log_path).await?;
 
-        // Split into lines
+        // 分割为行
         let lines: Vec<&str> = contents.lines().collect();
 
-        // If tail is specified, only show the last N lines
+        // 如果指定了 tail 参数，只显示最后 N 行
         let lines_to_print = if let Some(n) = tail {
             if n >= lines.len() {
                 &lines[..]
@@ -359,7 +568,7 @@ pub async fn show_log(
             &lines[..]
         };
 
-        // Print the lines
+        // 打印日志行
         for line in lines_to_print {
             println!("{}", line);
         }
@@ -368,27 +577,49 @@ pub async fn show_log(
     Ok(())
 }
 
-/// Show a formatted list of sandboxes
+/// 显示格式化的沙箱列表。
 ///
-/// This function can display sandbox information from any config in a standardized format.
+/// # 功能说明
 ///
-/// ## Arguments
-/// * `sandboxes` - A reference to a HashMap of sandbox configurations
+/// 此函数以标准化的格式显示沙箱配置信息，包括：
+/// - 沙箱名称和序号
+/// - 使用的镜像
+/// - 资源配置（CPU、内存）
+/// - 网络范围
+/// - 端口映射
+/// - 卷映射
+/// - 脚本列表
+/// - 依赖关系
 ///
-/// ## Example
+/// # 参数
+///
+/// * `sandboxes` - 沙箱配置的 HashMap 引用
+///
+/// # 输出格式示例
+///
+/// ```text
+/// 1. dev
+///    Image: ubuntu:22.04
+///    Resources: 2 CPUs, 1024 MiB
+///    Network: private
+///    Ports: 8080:80, 443:443
+///    Volumes: ./data:/data, ./config:/etc/config
+///    Scripts: start, shell, test
+///    Depends On: db, cache
+///
+/// Total: 1
+/// ```
+///
+/// # 示例
+///
 /// ```no_run
 /// use microsandbox_core::management::menv;
 /// use microsandbox_core::management::config;
 /// use std::path::Path;
 ///
 /// # async fn example() -> anyhow::Result<()> {
-/// // Show all sandboxes for a local project
+/// // 显示本地项目的所有沙箱
 /// let (config, _, _) = config::load_config(None::<&Path>, None).await?;
-/// menv::show_list(config.get_sandboxes());
-///
-/// // Show all sandboxes for a specific project directory
-/// let project_path = Path::new("/path/to/project");
-/// let (config, _, _) = config::load_config(Some(project_path), None).await?;
 /// menv::show_list(config.get_sandboxes());
 /// # Ok(())
 /// # }
@@ -401,26 +632,29 @@ where
     use console::style;
     use std::collections::HashMap;
 
-    // Convert the iterator into a HashMap for easier processing
+    // 将迭代器转换为 HashMap，便于处理
     let sandboxes: HashMap<&String, &crate::config::Sandbox> = sandboxes.into_iter().collect();
 
+    // 如果没有沙箱，显示提示信息
     if sandboxes.is_empty() {
         println!("No sandboxes found");
         return;
     }
 
+    // 遍历并显示每个沙箱
     for (i, (name, sandbox)) in sandboxes.iter().enumerate() {
+        // 在沙箱之间添加空行
         if i > 0 {
             println!();
         }
 
-        // Number and name
+        // 序号和名称
         println!("{}. {}", style(i + 1).bold(), style(*name).bold());
 
-        // Image
+        // 镜像
         println!("   {}: {}", style("Image").dim(), sandbox.get_image());
 
-        // Resources
+        // 资源
         let mut resources = Vec::new();
         if let Some(cpus) = sandbox.get_cpus() {
             resources.push(format!("{} CPUs", cpus));
@@ -432,10 +666,10 @@ where
             println!("   {}: {}", style("Resources").dim(), resources.join(", "));
         }
 
-        // Network
+        // 网络
         println!("   {}: {}", style("Network").dim(), sandbox.get_scope());
 
-        // Ports
+        // 端口
         if !sandbox.get_ports().is_empty() {
             let ports = sandbox
                 .get_ports()
@@ -446,7 +680,7 @@ where
             println!("   {}: {}", style("Ports").dim(), ports);
         }
 
-        // Volumes
+        // 卷
         if !sandbox.get_volumes().is_empty() {
             let volumes = sandbox
                 .get_volumes()
@@ -457,7 +691,7 @@ where
             println!("   {}: {}", style("Volumes").dim(), volumes);
         }
 
-        // Scripts
+        // 脚本
         if !sandbox.get_scripts().is_empty() {
             let scripts = sandbox
                 .get_scripts()
@@ -468,7 +702,7 @@ where
             println!("   {}: {}", style("Scripts").dim(), scripts);
         }
 
-        // Dependencies
+        // 依赖
         if !sandbox.get_depends_on().is_empty() {
             println!(
                 "   {}: {}",
@@ -478,24 +712,43 @@ where
         }
     }
 
+    // 显示总数
     println!("\n{}: {}", style("Total").dim(), sandboxes.len());
 }
 
-/// Show a formatted list of sandboxes across multiple projects
+/// 显示跨多个项目的格式化沙箱列表。
 ///
-/// This function displays sandbox information from all projects in a consolidated view.
-/// It's useful for server mode when you want to see all sandboxes across all projects.
+/// # 功能说明
 ///
-/// ## Arguments
-/// * `projects_parent_dir` - The parent directory containing project directories
+/// 此函数从所有项目中收集沙箱信息并以统一的格式显示。
+/// 适用于服务器模式，可以查看所有项目的所有沙箱。
 ///
-/// ## Example
+/// # 工作流程
+///
+/// 1. 读取项目父目录
+/// 2. 列出所有项目子目录
+/// 3. 预加载所有项目的配置文件（避免显示时的延迟）
+/// 4. 按字母顺序排序项目
+/// 5. 显示每个项目的沙箱列表
+/// 6. 显示汇总统计
+///
+/// # 参数
+///
+/// * `projects_parent_dir` - 包含项目目录的父目录路径
+///
+/// # 错误处理
+///
+/// - 如果项目目录不存在，返回 `PathNotFound` 错误
+/// - 如果某个项目的配置文件加载失败，显示错误信息但不中断
+///
+/// # 示例
+///
 /// ```no_run
 /// use std::path::Path;
 /// use microsandbox_core::management::menv;
 ///
 /// # async fn example() -> anyhow::Result<()> {
-/// // Show all sandboxes across all projects
+/// // 显示所有项目的所有沙箱
 /// menv::show_list_projects(Path::new("/path/to/projects")).await?;
 /// # Ok(())
 /// # }
@@ -507,7 +760,7 @@ pub async fn show_list_projects(projects_parent_dir: &std::path::Path) -> Micros
     use microsandbox_utils::term;
     use std::path::PathBuf;
 
-    // First check if projects directory exists
+    // 首先检查项目目录是否存在
     if !projects_parent_dir.exists() {
         return Err(MicrosandboxError::PathNotFound(format!(
             "Projects directory not found at {}",
@@ -515,7 +768,7 @@ pub async fn show_list_projects(projects_parent_dir: &std::path::Path) -> Micros
         )));
     }
 
-    // List all project directories
+    // 列出所有项目子目录
     let mut entries = tokio::fs::read_dir(projects_parent_dir).await?;
     let mut project_dirs = Vec::new();
 
@@ -526,27 +779,27 @@ pub async fn show_list_projects(projects_parent_dir: &std::path::Path) -> Micros
         }
     }
 
-    // Show a message if no projects found
+    // 如果没有找到项目，显示提示
     if project_dirs.is_empty() {
         println!("No projects found");
         return Ok(());
     }
 
-    // Sort project dirs alphabetically
+    // 按字母顺序排序项目目录
     project_dirs.sort_by(|a, b| {
         let a_name = a.file_name().and_then(|n| n.to_str()).unwrap_or("");
         let b_name = b.file_name().and_then(|n| n.to_str()).unwrap_or("");
         a_name.cmp(b_name)
     });
 
-    // Create a loading spinner
+    // 创建加载进度提示
     let loading_sp = term::create_spinner(
         format!("Loading {} projects", project_dirs.len()),
         None,
         None,
     );
 
-    // Pre-load all project configs to avoid lags between displaying each one
+    // 预加载所有项目配置的数据结构
     struct ProjectData {
         name: String,
         config: Option<(crate::config::Microsandbox, PathBuf, String)>,
@@ -555,7 +808,7 @@ pub async fn show_list_projects(projects_parent_dir: &std::path::Path) -> Micros
 
     let mut project_data = Vec::with_capacity(project_dirs.len());
 
-    // Collect all project data first
+    // 收集所有项目数据
     for project_dir in &project_dirs {
         let project = project_dir
             .file_name()
@@ -583,25 +836,26 @@ pub async fn show_list_projects(projects_parent_dir: &std::path::Path) -> Micros
         }
     }
 
+    // 完成加载进度提示
     loading_sp.finish_and_clear();
 
-    // Count totals
+    // 统计总数
     let project_count = project_dirs.len();
     let mut total_sandboxes = 0;
 
-    // Display all project data without delays
+    // 显示所有项目数据
     for (i, data) in project_data.iter().enumerate() {
-        // Add a newline between projects
+        // 在项目之间添加空行
         if i > 0 {
             println!();
         }
 
         if let Some((config, _, _)) = &data.config {
-            // Count the sandboxes in this project
+            // 统计该项目的沙箱数量
             let sandbox_count = config.get_sandboxes().len();
             total_sandboxes += sandbox_count;
 
-            // Only print if there are sandboxes
+            // 只有在有沙箱时才显示
             if sandbox_count > 0 {
                 print_project_header(&data.name);
                 show_list(config.get_sandboxes());
@@ -612,7 +866,7 @@ pub async fn show_list_projects(projects_parent_dir: &std::path::Path) -> Micros
         }
     }
 
-    // Show summary with the captured counts
+    // 显示汇总统计
     println!(
         "\n{}: {}, {}: {}",
         style("Total Projects").dim(),
@@ -624,53 +878,78 @@ pub async fn show_list_projects(projects_parent_dir: &std::path::Path) -> Micros
     Ok(())
 }
 
-/// Prints a stylized header for project display
+/// 打印项目标题头。
+///
+/// # 输出格式
+///
+/// ```text
+/// PROJECT: project_name
+/// ────────────────────────────────────────────────────────────────────────
+/// ```
 #[cfg(feature = "cli")]
 pub fn print_project_header(project: &str) {
     use console::style;
 
-    // Create the simple title text without padding
+    // 创建标题文本
     let title = format!("PROJECT: {}", project);
 
-    // Print the title with white color and underline styling
+    // 使用白色加粗样式打印标题
     println!("\n{}", style(title).white().bold());
 
-    // Print a separator line
+    // 打印分隔线
     println!("{}", style("─".repeat(80)).dim());
 }
 
 //--------------------------------------------------------------------------------------------------
-// Functions: Helpers
+// 内部辅助函数
 //--------------------------------------------------------------------------------------------------
 
-/// Create the required directories and files for a microsandbox environment
+/// 创建 Microsandbox 环境所需的目录和文件。
+///
+/// # 创建的内容
+///
+/// 1. **日志目录** (`log/`) - 存放沙箱运行日志
+/// 2. **可写层目录** (`rw/`) - overlayfs 的可写层
+/// 3. **沙箱数据库** (`sandbox.db`) - SQLite 数据库，记录沙箱状态
+///
+/// # 注意
+///
+/// - 不会创建 `rootfs/` 目录，该目录在 monofs 准备好时创建
+/// - 数据库会自动初始化迁移
 pub(crate) async fn ensure_menv_files(menv_path: &Path) -> MicrosandboxResult<()> {
-    // Create log directory if it doesn't exist
+    // 创建日志目录
     fs::create_dir_all(menv_path.join(LOG_SUBDIR)).await?;
 
-    // We'll create rootfs directory later when monofs is ready
+    // 创建可写层目录（rootfs 稍后在 monofs 准备好时创建）
     fs::create_dir_all(menv_path.join(RW_SUBDIR)).await?;
 
-    // Get the sandbox database path
+    // 获取沙箱数据库路径
     let db_path = menv_path.join(SANDBOX_DB_FILENAME);
 
-    // Initialize sandbox database
+    // 初始化沙箱数据库（自动执行迁移）
     let _ = db::initialize(&db_path, &db::SANDBOX_DB_MIGRATOR).await?;
     tracing::info!("sandbox database at {}", db_path.display());
 
     Ok(())
 }
 
-/// Create a default microsandbox configuration file
+/// 创建默认的 Microsandbox 配置文件。
+///
+/// # 实现细节
+///
+/// - 只在配置文件不存在时创建
+/// - 使用 `DEFAULT_CONFIG` 常量中的预定义内容
+/// - [CLI 功能] 显示创建进度提示
 pub(crate) async fn create_default_config(project_dir: &Path) -> MicrosandboxResult<()> {
     let config_path = project_dir.join(MICROSANDBOX_CONFIG_FILENAME);
 
-    // Only create if it doesn't exist
+    // 只在配置文件不存在时创建
     if !config_path.exists() {
         #[cfg(feature = "cli")]
         let create_default_config_sp =
             term::create_spinner(CREATE_DEFAULT_CONFIG_MSG.to_string(), None, None);
 
+        // 写入默认配置内容
         let mut file = fs::File::create(&config_path).await?;
         file.write_all(DEFAULT_CONFIG.as_bytes()).await?;
 
@@ -681,10 +960,31 @@ pub(crate) async fn create_default_config(project_dir: &Path) -> MicrosandboxRes
     Ok(())
 }
 
-/// Updates or creates a .gitignore file to include the .menv directory
+/// 更新或创建 `.gitignore` 文件，确保包含 `.menv` 目录条目。
+///
+/// # 实现细节
+///
+/// ## 如果 `.gitignore` 已存在
+///
+/// 1. 读取文件内容
+/// 2. 检查是否已包含 `.menv` 或 `.menv/` 条目
+/// 3. 如果不包含，追加新行：
+///    - 确保以换行符开头（如果文件不是以换行结尾）
+///    - 追加 `.menv/` 条目
+///
+/// ## 如果 `.gitignore` 不存在
+///
+/// 创建新文件，内容为 `.menv/\n`
+///
+/// # 为什么使用 `.menv/` 而不是 `.menv`？
+///
+/// - `.menv/` 明确表示只忽略目录，不忽略同名文件
+/// - 这是 Git 的最佳实践
 pub(crate) async fn update_gitignore(project_dir: &Path) -> MicrosandboxResult<()> {
     let gitignore_path = project_dir.join(".gitignore");
+    // 使用标准格式：以斜杠结尾表示目录
     let canonical_entry = format!("{}/", MICROSANDBOX_ENV_DIR);
+    // 可接受的条目格式（兼容两种写法）
     let acceptable_entries = [MICROSANDBOX_ENV_DIR, &canonical_entry[..]];
 
     if gitignore_path.exists() {
@@ -694,8 +994,9 @@ pub(crate) async fn update_gitignore(project_dir: &Path) -> MicrosandboxResult<(
             acceptable_entries.contains(&trimmed)
         });
 
+        // 如果条目不存在，追加到文件末尾
         if !already_present {
-            // Ensure we start on a new line
+            // 确保从新行开始
             let prefix = if content.ends_with('\n') { "" } else { "\n" };
             let mut file = fs::OpenOptions::new()
                 .append(true)
@@ -705,7 +1006,7 @@ pub(crate) async fn update_gitignore(project_dir: &Path) -> MicrosandboxResult<(
                 .await?;
         }
     } else {
-        // Create new .gitignore with canonical entry (.menv/)
+        // 创建新 .gitignore，使用标准格式（.menv/）
         fs::write(&gitignore_path, format!("{}\n", canonical_entry)).await?;
     }
 
