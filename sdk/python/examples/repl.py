@@ -1,21 +1,25 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-Advanced example demonstrating the Python sandbox features.
+Python 沙箱高级示例 (Python Sandbox Advanced Examples)
 
-This example shows:
-1. Different ways to create and manage sandboxes
-2. Resource configuration (memory, CPU)
-3. Error handling
-4. Multiple code execution patterns
-5. Output handling
-6. Timeouts and handling long-running starts
+本脚本演示了 Python 沙箱的各种高级功能。
 
-Before running this example:
-    1. Install the package: pip install -e .
-    2. Start the Microsandbox server (microsandbox-server)
-    3. Run this script: python -m examples.python_sandbox
+演示内容：
+    1. 使用异步上下文管理器创建和管理沙箱
+    2. 资源配置（内存、CPU）
+    3. 错误处理
+    4. 多种代码执行模式
+    5. 输出处理
+    6. 超时和长时间启动的处理
 
-Note: If authentication is enabled on the server, set MSB_API_KEY in your environment.
+运行前准备：
+    1. 安装包：pip install -e .
+    2. 启动 Microsandbox 服务器 (microsandbox-server)
+    3. 运行此脚本：python -m examples.repl
+
+注意：
+    - 如果服务器启用了认证，需要设置 MSB_API_KEY 环境变量
 """
 
 import asyncio
@@ -25,83 +29,98 @@ from microsandbox import PythonSandbox
 
 
 async def example_context_manager():
-    """Example using the async context manager pattern."""
-    print("\n=== Context Manager Example ===")
+    """
+    使用异步上下文管理器的示例。
+
+    演示如何使用 async with 语法自动管理沙箱的生命周期。
+    这是推荐的沙箱使用方式，因为它会自动处理启动、停止和资源清理。
+    """
+    print("\n=== 上下文管理器示例 ===")
 
     async with PythonSandbox.create(name="sandbox-cm") as sandbox:
-        # Run some computation
+        # 运行一些计算
         code = """
 print("Hello, world!")
 """
         execution = await sandbox.run(code)
         output = await execution.output()
-        print("Output:", output)
+        print("输出：", output)
 
 
 async def example_explicit_lifecycle():
-    """Example using explicit lifecycle management."""
-    print("\n=== Explicit Lifecycle Example ===")
+    """
+    使用显式生命周期管理的示例。
 
-    # Create sandbox with custom configuration
+    演示如何手动控制沙箱的启动和停止。
+    这种方式提供更多的控制权，但需要手动清理资源。
+    """
+    print("\n=== 显式生命周期示例 ===")
+
+    # 使用自定义配置创建沙箱
     sandbox = PythonSandbox(
         server_url="http://127.0.0.1:5555", name="sandbox-explicit"
     )
 
-    # Create HTTP session
+    # 创建 HTTP 会话
     sandbox._session = aiohttp.ClientSession()
 
     try:
-        # Start with resource constraints
+        # 使用资源限制启动沙箱
         await sandbox.start(
-            memory=1024,  # 1GB RAM
-            cpus=2.0,  # 2 CPU cores
+            memory=1024,  # 1GB 内存
+            cpus=2.0,  # 2 核 CPU
         )
 
-        # Run multiple code blocks with variable assignments
+        # 运行多个带有变量赋值的代码块
         await sandbox.run("x = 42")
         await sandbox.run("y = [i**2 for i in range(10)]")
         execution3 = await sandbox.run("print(f'x = {x}')\nprint(f'y = {y}')")
 
-        print("Output:", await execution3.output())
+        print("输出：", await execution3.output())
 
-        # Demonstrate error handling
+        # 演示错误处理
         try:
-            error_execution = await sandbox.run(
-                "1/0"
-            )  # This will raise a ZeroDivisionError
-            print("Error:", await error_execution.error())
+            # 这将导致 ZeroDivisionError
+            error_execution = await sandbox.run("1/0")
+            print("错误：", await error_execution.error())
         except RuntimeError as e:
-            print("Caught error:", e)
+            print(f"捕获错误：{e}")
 
     finally:
-        # Cleanup
+        # 清理资源
+        # finally 块确保即使发生错误也会执行清理
         await sandbox.stop()
         await sandbox._session.close()
 
 
 async def example_execution_chaining():
-    """Example demonstrating execution chaining with variables."""
-    print("\n=== Execution Chaining Example ===")
+    """
+    执行链示例，演示变量状态保持。
+
+    演示如何在多次执行之间共享变量状态。
+    REPL 环境的特点就是保持状态，后续执行可以使用之前定义的变量。
+    """
+    print("\n=== 执行链示例 ===")
 
     async with PythonSandbox.create(name="sandbox-chain") as sandbox:
-        # Execute a sequence of related code blocks
+        # 执行一系列相关的代码块
         await sandbox.run("name = 'Python'")
         await sandbox.run("import sys")
         await sandbox.run("version = sys.version")
         exec = await sandbox.run("print(f'Hello from {name} {version}!')")
 
-        # Only get output from the final execution
-        print("Output:", await exec.output())
+        # 只获取最后一次执行的输出
+        print("输出：", await exec.output())
 
 
 async def main():
-    """Run all examples."""
+    """运行所有示例的主函数。"""
     try:
         await example_context_manager()
         await example_explicit_lifecycle()
         await example_execution_chaining()
     except Exception as e:
-        print(f"Error running examples: {e}")
+        print(f"运行示例时出错：{e}")
 
 
 if __name__ == "__main__":

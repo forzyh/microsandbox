@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-Example demonstrating how to use NodeSandbox to execute JavaScript code.
+Node.js 沙箱示例 (Node.js Sandbox Examples)
 
-This example shows:
-1. Basic Node.js code execution
-2. Different sandbox management patterns
-3. JavaScript module usage
-4. Error output handling
+本脚本演示了如何使用 NodeSandbox 执行 JavaScript 代码。
 
-Before running this example:
-    1. Install the package: pip install -e .
-    2. Start the Microsandbox server (microsandbox-server)
-    3. Run this script: python -m examples.node
+演示内容：
+    1. 基本 Node.js 代码执行
+    2. 不同的沙箱管理模式
+    3. JavaScript 模块使用
+    4. 错误输出处理
+
+运行前准备：
+    1. 安装包：pip install -e .
+    2. 启动 Microsandbox 服务器 (microsandbox-server)
+    3. 运行此脚本：python -m examples.node
+
+注意：
+    - 如果服务器启用了认证，需要设置 MSB_API_KEY 环境变量
 """
 
 import asyncio
@@ -20,84 +26,100 @@ from microsandbox import NodeSandbox
 
 
 async def basic_example():
-    """Example showing basic JavaScript code execution with context manager."""
-    print("\n=== Basic Node.js Example ===")
+    """
+    基本 JavaScript 代码执行示例。
 
-    # Create a sandbox using a context manager (automatically handles start/stop)
+    演示如何使用上下文管理器执行简单的 Node.js 代码。
+    """
+    print("\n=== 基本 Node.js 示例 ===")
+
+    # 使用上下文管理器创建沙箱（自动处理启动/停止）
     async with NodeSandbox.create(name="node-basic") as sandbox:
-        # Run a simple JavaScript code snippet
+        # 运行简单的 JavaScript 代码
         execution = await sandbox.run("console.log('Hello from Node.js!');")
         output = await execution.output()
-        print("Output:", output)
+        print("输出：", output)
 
-        # Run JavaScript code that uses Node.js functionality
+        # 运行使用 Node.js 功能的代码
         version_code = """
 const version = process.version;
 const platform = process.platform;
 console.log(`Node.js ${version} running on ${platform}`);
 """
         version_execution = await sandbox.run(version_code)
-        print("Node.js info:", await version_execution.output())
+        print("Node.js 信息：", await version_execution.output())
 
 
 async def error_handling_example():
-    """Example showing how to handle JavaScript errors."""
-    print("\n=== Error Handling Example ===")
+    """
+    JavaScript 错误处理示例。
+
+    演示如何处理 JavaScript 代码执行过程中的错误。
+    """
+    print("\n=== 错误处理示例 ===")
 
     async with NodeSandbox.create(name="node-error") as sandbox:
-        # Run code with a caught error
+        # 运行包含错误处理的代码
         caught_error_code = """
 try {
-    // This will cause a ReferenceError
+    // 这将导致 ReferenceError
     console.log(undefinedVariable);
 } catch (error) {
     console.error('Caught error:', error.message);
 }
 """
         caught_execution = await sandbox.run(caught_error_code)
-        print("Standard output:", await caught_execution.output())
-        print("Error output:", await caught_execution.error())
-        print("Has error:", caught_execution.has_error())
+        print("标准输出：", await caught_execution.output())
+        print("错误输出：", await caught_execution.error())
+        print("包含错误：", caught_execution.has_error())
 
 
 async def module_example():
-    """Example showing Node.js module usage."""
-    print("\n=== Module Usage Example ===")
+    """
+    Node.js 模块使用示例。
+
+    演示如何使用 Node.js 内置模块（fs 和 os）。
+    """
+    print("\n=== 模块使用示例 ===")
 
     async with NodeSandbox.create(name="node-module") as sandbox:
-        # Using built-in Node.js modules
+        # 使用 Node.js 内置模块
         fs_code = """
 const fs = require('fs');
 const os = require('os');
 
-// Write a file
+// 写入文件
 fs.writeFileSync('/tmp/hello.txt', 'Hello from Node.js!');
-console.log('File written successfully');
+console.log('文件写入成功');
 
-// Read the file back
+// 读取文件
 const content = fs.readFileSync('/tmp/hello.txt', 'utf8');
-console.log('File content:', content);
+console.log('文件内容：', content);
 
-// Get system info
-console.log('Hostname:', os.hostname());
-console.log('Platform:', os.platform());
-console.log('Architecture:', os.arch());
+// 获取系统信息
+console.log('主机名：', os.hostname());
+console.log('平台：', os.platform());
+console.log('架构：', os.arch());
 """
         fs_execution = await sandbox.run(fs_code)
         print(await fs_execution.output())
 
 
 async def execution_chaining_example():
-    """Example demonstrating execution chaining with variables."""
-    print("\n=== Execution Chaining Example ===")
+    """
+    执行链示例，演示变量状态保持。
+
+    演示如何在多次执行之间共享变量状态。
+    """
+    print("\n=== 执行链示例 ===")
 
     async with NodeSandbox.create(name="node-chain") as sandbox:
-        # Execute a sequence of related code blocks that maintain state
+        # 执行一系列保持状态的代码块
         await sandbox.run("const name = 'Node.js';")
         await sandbox.run("const version = process.version;")
         await sandbox.run("const numbers = [1, 2, 3, 4, 5];")
 
-        # Use variables from previous executions
+        # 使用之前执行中定义的变量
         final_execution = await sandbox.run("""
 console.log(`Hello from ${name} ${version}!`);
 const sum = numbers.reduce((a, b) => a + b, 0);
@@ -108,8 +130,8 @@ console.log(`Sum of numbers: ${sum}`);
 
 
 async def main():
-    """Run all examples."""
-    print("Node.js Sandbox Examples")
+    """运行所有示例的主函数。"""
+    print("Node.js 沙箱示例")
     print("=======================")
 
     try:
@@ -118,9 +140,9 @@ async def main():
         await module_example()
         await execution_chaining_example()
 
-        print("\nAll Node.js examples completed!")
+        print("\n所有 Node.js 示例完成！")
     except Exception as e:
-        print(f"Error running examples: {e}")
+        print(f"运行示例时出错：{e}")
 
 
 if __name__ == "__main__":
